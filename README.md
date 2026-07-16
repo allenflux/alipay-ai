@@ -27,7 +27,7 @@
 
 ## GPU 服务端安装
 
-在服务端先按 [PyTorch 官方安装器](https://pytorch.org/get-started/locally/) 选择和 CUDA 驱动匹配的 `torch` / `torchvision`。再安装其余依赖和本工程：
+在服务端先按 [PyTorch 官方安装器](https://pytorch.org/get-started/locally/) 选择和 CUDA 驱动匹配的 `torch` / `torchvision`。再安装其余依赖和本工程。`requirements.txt` 故意不再安装 PyTorch，避免 Windows 从 PyPI 自动装成 CPU 版：
 
 ```bash
 python3 -m venv .venv
@@ -42,7 +42,7 @@ python -m pip install -e .
 验证 GPU：
 
 ```bash
-python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+python scripts/check_gpu.py
 ```
 
 如果服务端没有外网，先将 PyTorch、TorchVision、PaddlePaddle 和 PaddleOCR 的 wheel 下载到服务器，再从本地 wheel 安装。训练从未缓存权重时，`--pretrained` 会下载一次约 74 MB 的 TorchVision COCO 权重；离线环境可改为 `--no-pretrained`。
@@ -52,15 +52,18 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 工程的路径、训练和推理代码都兼容 Windows Server，不依赖 Bash、Linux 路径或 `fork`。推荐 Python 3.10–3.12；先通过 `nvidia-smi` 确认 NVIDIA 驱动与 CUDA 环境，再在 [PyTorch Windows 安装器](https://docs.pytorch.org/get-started/locally/) 选择 **Windows / Pip / 对应 CUDA**，使用它给出的 `torch` 与 `torchvision` 安装命令。
 
 ```powershell
-py -3.11 -m venv .venv
+py -3.10 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-# 先执行 PyTorch 官方安装器为当前 CUDA 给出的命令
+# 若先前装过 CPU 版，先卸载它：
+python -m pip uninstall -y torch torchvision torchaudio
+# 先执行 PyTorch 官方安装器为当前 CUDA 给出的命令；RTX 4090 + CUDA 13.3 驱动可用 CUDA 13.0 wheel：
+python -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu130
 python -m pip install -r requirements.txt
 # 按 PaddlePaddle Windows GPU 安装页选择匹配 CUDA 的 paddlepaddle-gpu wheel 后：
 python -m pip install -r requirements-ocr.txt
 python -m pip install -e .
-python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+python scripts/check_gpu.py
 ```
 
 PaddleOCR 的 GPU wheel 也必须与 Windows/CUDA 对应，按 [PaddlePaddle Windows pip 文档](https://www.paddlepaddle.org.cn/documentation/docs/en/install/pip/windows-pip_en.html) 选择；即使 PaddleOCR 暂时装 CPU 版，LRCNN 的 PyTorch 训练仍会使用 NVIDIA GPU。首次在 Windows 上训练建议加 `--workers 0` 验证数据路径，通畅后再改为 `--workers 4` 或更高。

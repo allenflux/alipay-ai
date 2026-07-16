@@ -1,8 +1,7 @@
-# Install with: python -m pip install -r requirements.txt
-# PaddlePaddle itself is platform-specific; see README before enabling PaddleOCR.
+# Install the matching CUDA build of PyTorch/TorchVision separately FIRST.
+# See README: installing torch from PyPI on Windows may select a CPU-only wheel.
+# PaddlePaddle itself is also platform-specific; see README before enabling PaddleOCR.
 numpy>=1.26
 opencv-python>=4.10
 Pillow>=10.3
-torch>=2.3
-torchvision>=0.18
 tqdm>=4.66
