@@ -266,4 +266,9 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    # Harmless on Linux; required for safe multiprocessing startup in some
+    # Windows Server deployment environments.
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     main()
