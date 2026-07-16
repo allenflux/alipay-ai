@@ -127,8 +127,11 @@ python scripts/prepare_photos.py \
 python scripts/labelme_to_coco.py \
   --labels data/labels/all \
   --images data/rectified/images \
-  --output data/annotations/all.json
+  --output data/annotations/all.json \
+  --require-complete
 ```
+
+`--require-complete` 会检查每张图必须恰好包含上述五类各一个框，并输出每类框数；少框或重复框时会直接指出对应的 LabelMe JSON。
 
 ### 3. 为什么不能把全部图片都用于训练
 
