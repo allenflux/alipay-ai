@@ -135,14 +135,42 @@ def full_image_quad(width: int, height: int) -> np.ndarray:
     )
 
 
-def _quad_score(quad: np.ndarray, image_width: int, image_height: int) -> float:
+SCREEN_SCORE_FLOOR = 0.10
+
+
+def _quad_side_lengths(quad: np.ndarray) -> tuple[float, float]:
+    """Return the mean horizontal and vertical side lengths of an ordered quad."""
+    top = float(np.linalg.norm(quad[1] - quad[0]))
+    bottom = float(np.linalg.norm(quad[2] - quad[3]))
+    left = float(np.linalg.norm(quad[3] - quad[0]))
+    right = float(np.linalg.norm(quad[2] - quad[1]))
+    return (top + bottom) / 2.0, (left + right) / 2.0
+
+
+def _quad_score(
+    quad: np.ndarray,
+    image_width: int,
+    image_height: int,
+    *,
+    prefer_portrait: bool = True,
+) -> float:
     image_area = float(image_width * image_height)
     area = abs(float(cv2.contourArea(quad)))
-    if area < image_area * 0.08 or area > image_area * 0.995:
+    if area < image_area * 0.15 or area > image_area * 0.995:
         return -1.0
 
     x, y, width, height = cv2.boundingRect(quad.astype(np.int32))
     if width < 40 or height < 40:
+        return -1.0
+    quad_width, quad_height = _quad_side_lengths(quad)
+    # Use the perspective-aware side lengths rather than the enclosing bounding
+    # box. A phone photographed at an angle can have a misleading bbox aspect.
+    if prefer_portrait and quad_width >= quad_height:
+        return -1.0
+    # A transfer receipt is rendered on a phone-sized/roughly rectangular screen.
+    # Extremely thin panels are normally UI cards, not a device screen.
+    short_to_long_side = min(quad_width, quad_height) / max(quad_width, quad_height)
+    if short_to_long_side < 0.35:
         return -1.0
     # A contour around the entire image is normally an edge artefact, not a screen.
     touches_all_edges = x <= 2 and y <= 2 and x + width >= image_width - 2 and y + height >= image_height - 2
@@ -152,20 +180,36 @@ def _quad_score(quad: np.ndarray, image_width: int, image_height: int) -> float:
     rectangularity = area / max(float(width * height), 1.0)
     if rectangularity < 0.48:
         return -1.0
-    touches = sum(
-        (
-            x <= 2,
-            y <= 2,
-            x + width >= image_width - 2,
-            y + height >= image_height - 2,
-        )
+    touches_left = x <= 2
+    touches_top = y <= 2
+    touches_right = x + width >= image_width - 2
+    touches_bottom = y + height >= image_height - 2
+    touches = sum((touches_left, touches_top, touches_right, touches_bottom))
+    coverage = area / image_area
+    width_span = width / image_width
+    height_span = height / image_height
+    adjacent_edge_contact = (
+        (touches_left and touches_top)
+        or (touches_top and touches_right)
+        or (touches_right and touches_bottom)
+        or (touches_bottom and touches_left)
     )
+    # Interior UI cards can be rectangular as well. A completely interior screen
+    # must be large in *both* image dimensions. Touching opposite edges (for
+    # example, a horizontal card spanning left/right) is intentionally not treated
+    # as a cropped phone. Adjacent edges are the only safe relaxed case, because a
+    # photographed phone can genuinely be cut off at a corner of the source photo.
+    if adjacent_edge_contact:
+        if coverage < 0.18:
+            return -1.0
+    elif coverage < 0.30 or width_span < 0.45 or height_span < 0.45:
+        return -1.0
     # Large, rectangular candidates are desirable; a tiny penalty allows a screen
     # to touch one or two image borders, as often happens with a cropped photo.
-    return (area / image_area) * (0.7 + 0.3 * rectangularity) - 0.025 * touches
+    return coverage * (0.7 + 0.3 * rectangularity) - 0.025 * touches
 
 
-def find_screen_quad(image_rgb: np.ndarray) -> np.ndarray | None:
+def find_screen_quad(image_rgb: np.ndarray, *, prefer_portrait: bool = True) -> np.ndarray | None:
     """Find the most likely phone/screen quadrilateral using image geometry.
 
     This is deliberately conservative.  Returning ``None`` falls back to the
@@ -194,10 +238,10 @@ def find_screen_quad(image_rgb: np.ndarray) -> np.ndarray | None:
         if len(quad) != 4 or not cv2.isContourConvex(quad):
             continue
         candidate = order_quad(quad.reshape(4, 2))
-        score = _quad_score(candidate, width, height)
+        score = _quad_score(candidate, width, height, prefer_portrait=prefer_portrait)
         if score > best_score:
             best_quad, best_score = candidate, score
-    return best_quad
+    return best_quad if best_score >= SCREEN_SCORE_FLOOR else None
 
 
 def _quad_dimensions(quad: np.ndarray) -> tuple[int, int]:
@@ -275,7 +319,7 @@ def rectify_receipt(image_rgb: np.ndarray, options: RectificationOptions | None 
         quad_rotated = order_quad(transform_points(quad_original, rotate_h))
         screen_detected = True
     elif options.auto_screen:
-        detected_quad = find_screen_quad(rotated_rgb)
+        detected_quad = find_screen_quad(rotated_rgb, prefer_portrait=options.prefer_portrait)
         quad_rotated = detected_quad if detected_quad is not None else full_image_quad(rotated_rgb.shape[1], rotated_rgb.shape[0])
         screen_detected = detected_quad is not None
         quad_original = transform_points(quad_rotated, np.linalg.inv(rotate_h))

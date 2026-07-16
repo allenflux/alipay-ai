@@ -18,7 +18,7 @@ from tqdm import tqdm
 from .dataset import ReceiptCocoDataset, collate_detection_batch
 from .labels import DETECTION_CLASSES
 from .metrics import evaluate_map50
-from .model import LRCNNConfig, build_lrcnn, choose_device
+from .model import LRCNNConfig, build_lrcnn, choose_device, validate_checkpoint_classes
 
 
 @dataclass(frozen=True)
@@ -126,6 +126,7 @@ def train_detector(
     resume_payload: dict[str, Any] | None = None
     if resume is not None:
         resume_payload = torch.load(resume, map_location="cpu", weights_only=False)
+        validate_checkpoint_classes(resume_payload)
         checkpoint_config = resume_payload.get("model_config", {})
         if isinstance(checkpoint_config, dict):
             model_config = LRCNNConfig(**checkpoint_config)

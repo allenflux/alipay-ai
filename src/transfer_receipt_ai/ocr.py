@@ -26,6 +26,37 @@ def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+_FIELD_LABELS = {
+    "recipient": ("收款方", "收款人", "收款账户", "收款账号"),
+    "payment_method": ("付款方式", "交易方式", "付款渠道", "支付方式"),
+}
+
+
+def extract_field_value(raw_text: str, field: str) -> str:
+    """Extract the right-side value from OCR of a complete receipt row.
+
+    The detector boxes the entire row selected by the user (for example,
+    ``收款方 富森(**森)``). The raw OCR remains available, while this function
+    returns just the business value for structured output.
+    """
+    text = clean_text(raw_text)
+    labels = _FIELD_LABELS.get(field)
+    if labels is None:
+        raise ValueError(f"Unknown field: {field}")
+    for label in labels:
+        position = text.find(label)
+        if position >= 0:
+            value = text[position + len(label) :].lstrip(" :：-—")
+            if value:
+                return value
+            # OCR occasionally emits the right-hand value before the left-hand
+            # label. Keep that value instead of returning the whole row.
+            value_before_label = text[:position].rstrip(" :：-—")
+            if value_before_label:
+                return value_before_label
+    return text
+
+
 def _extract_paddle_lines(payload: Any) -> list[tuple[str, float]]:
     """Support the common PaddleOCR 2.x result shape and its dict variants."""
     lines: list[tuple[str, float]] = []
@@ -107,6 +138,15 @@ class PaddleOCRReader:
 
 
 _AMOUNT_PATTERN = re.compile(r"(?:[¥￥]\s*)?([0-9OoIl]{1,3}(?:,[0-9OoIl]{3})*(?:\.\d{1,2})?)")
+_TIME_PATTERN = re.compile(r"(?<!\d)(\d{1,2}:\d{2}(?::\d{2})?)(?!\d)")
+
+
+def normalize_time(raw_text: str) -> str | None:
+    """Extract the visible status-bar time without inventing a transaction time."""
+    # OCR commonly returns a full-width Chinese colon. Do not use ``\b`` here:
+    # Chinese characters next to the time count as Unicode word characters.
+    match = _TIME_PATTERN.search(clean_text(raw_text).replace("：", ":"))
+    return match.group(1) if match else None
 
 
 def normalize_amount(raw_text: str) -> dict[str, object] | None:
@@ -143,26 +183,26 @@ def normalize_amount(raw_text: str) -> dict[str, object] | None:
 
 def normalize_status(raw_text: str) -> str:
     compact = re.sub(r"\s+", "", raw_text)
-    if any(token in compact for token in ("转账成功", "交易成功", "付款成功", "转帐成功")):
-        return "success"
     if any(token in compact for token in ("失败", "未成功", "已撤销")):
         return "failed"
     if any(token in compact for token in ("处理中", "待处理", "进行中")):
         return "pending"
+    if any(token in compact for token in ("转账成功", "交易成功", "付款成功", "转帐成功")):
+        return "success"
     return "unknown"
 
 
 def normalize_payment_method(raw_text: str) -> dict[str, str]:
     raw = clean_text(raw_text)
     compact = re.sub(r"\s+", "", raw)
-    if "余额" in compact:
+    if "余额宝" in compact:
+        kind = "yuebao"
+    elif "余额" in compact:
         kind = "balance"
     elif "花呗" in compact:
         kind = "huabei"
     elif any(token in compact for token in ("银行卡", "储蓄卡", "信用卡")):
         kind = "bank_card"
-    elif "余额宝" in compact:
-        kind = "yuebao"
     else:
         kind = "other"
     return {"raw": raw, "normalized": kind}

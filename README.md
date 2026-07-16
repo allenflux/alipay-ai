@@ -2,15 +2,17 @@
 
 这个工程从**干净的原始截图或拍照图**中定位并读取以下五个区域：
 
-1. `amount`：金额（如 `¥199.93`）
-2. `success_icon`：`转账成功` 前面的勾
-3. `success_text`：`转账成功` 文字
-4. `recipient_value`：收款方的实际值（不包含左侧“收款方”标签）
-5. `payment_method_value`：付款方式的实际值（不包含左侧“付款方式”标签）
+1. `time`：左上角状态栏时间（如 `00:01:09`）
+2. `amount`：金额（如 `¥199.93`）
+3. `transfer_status`：**勾和“转账成功”文字合在同一个框**
+4. `recipient_field`：整条“收款方 → 收款人值”行；输出时提取右侧收款人值
+5. `payment_method_field`：整条“付款/交易方式 → 方式值”行；输出时提取右侧付款方式
 
-模型为 `LRCNNDetector`：MobileNetV3-FPN + RPN + RoIAlign + Fast R-CNN 检测头。它只负责**位置定位**；中文内容由 PaddleOCR 从定位后的裁图读取。这样金额、姓名、付款方式不会被模型当成固定文字死记。
+模型为 `LRCNNDetector`：MobileNetV3-FPN + RPN + RoIAlign + Fast R-CNN 检测头。它只负责**位置定位**；文字内容由 PaddleOCR 从定位后的裁图读取。这样时间、金额、姓名、付款方式不会被模型当成固定文字死记。
 
 > 重要：数据集里的图片必须是没有红框、红线、圆圈的原图。红圈只在推理结果副本上绘制，原始图片不被改动。
+
+> 类别顺序已经固定为上述五类。此前把勾和“转账成功”拆成两类的旧标注或 checkpoint 不能续用，必须按本规范重新标注并从头训练。
 
 ## 处理流程
 
@@ -19,7 +21,7 @@
   → EXIF 方向修正 / 四向文字方向评分
   → 手机屏幕四角检测 + 透视拉伸纠正
   → LRCNN 定位五个区域
-  → PaddleOCR 读取金额、成功文字、收款人、付款方式
+  → PaddleOCR 读取时间、金额、转账状态、收款人、付款方式
   → JSON 结构化结果 + 原图/纠正图上的圆圈结果
 ```
 
@@ -100,8 +102,9 @@ python scripts/prepare_photos.py \
 ```
 
 - 默认会应用 EXIF 方向；宽图默认转成竖屏；`--ocr-orientation` 会用 OCR 对 0/90/180/270° 打分，能处理上下颠倒的文字。
-- 默认会找手机/屏幕四边形并进行 `warpPerspective`。直接截图通常会保留完整画面。
+- 默认会保守地找手机/屏幕四边形并进行 `warpPerspective`；横向广告卡、收款人卡等 UI 面板会被排除。直接截图会保留完整画面。
 - 反光、边缘缺失的照片可在 `data/corrections.json` 写人工四角或固定方向，示例见 [data/corrections.example.json](data/corrections.example.json)。人工修正优先于自动判断。
+- 如果这一批全是完整截图，第一次准备时可加 `--no-auto-screen`，确保绝不裁切页面；拍照图单独一批再使用默认自动矫正。
 
 ### 2. 标注（不在图片上画红框）
 
@@ -109,13 +112,13 @@ python scripts/prepare_photos.py \
 
 | LabelMe 标签 | 应框选的内容 | 示例 |
 |---|---|---|
+| `time` | 左上角状态栏显示的完整时间；不框网络、信号、电量图标 | `00:01:09` |
 | `amount` | 货币符号和完整金额 | `¥199.93` |
-| `success_icon` | 成功文字左侧那个勾 | 圆形勾图标 |
-| `success_text` | 仅成功文字 | `转账成功` |
-| `recipient_value` | 收款人右侧实际值 | `上平(**平)` |
-| `payment_method_value` | 付款方式右侧实际值 | `账户余额` |
+| `transfer_status` | **勾图标 + “转账成功”文字作为同一个框** | `◯✓ 转账成功` |
+| `recipient_field` | **整条**“收款方 → 收款人值”行（红线左端到右端） | `收款方    上平(**平)` |
+| `payment_method_field` | **整条**“付款/交易方式 → 方式值”行（红线左端到右端） | `交易方式    账户余额` |
 
-不要标广告卡片里的其他金额、其他勾图标，也不要把左侧“收款方”“付款方式”标题和右侧值框在同一个框里。对文字框，在 LabelMe 的 `description` 填入人工确认过的文本，可留作 OCR 真值；收款人中的 `*` 必须原样保留，不能尝试还原脱敏信息。
+不要标广告卡片里的其他金额、其他勾图标，也不要标下面白色“立即通知收款人”卡片。收款方与付款方式两类必须按上表框**完整红线行**；OCR 会从行内自动拆出右侧实际值。对文字框，在 LabelMe 的 `description` 填入人工确认过的文本，可留作 OCR 真值；收款人中的 `*` 必须原样保留，不能尝试还原脱敏信息。
 
 转换为 COCO：
 
@@ -168,13 +171,13 @@ python scripts/train.py \
   --pretrained
 ```
 
-显存不够时先将 `--batch-size` 改为 `1`，再把 `--max-size` 从 `1536` 降为 `1280`；不要把小勾图标裁没。训练中优先关注验证集的每类 `AP50` 和 `recall50`，而不是训练 loss。需要续训：
+显存不够时先将 `--batch-size` 改为 `1`，再把 `--max-size` 从 `1536` 降为 `1280`；不要把左上角时间或“勾+转账成功”整体裁没。训练中优先关注验证集的每类 `AP50` 和 `recall50`，而不是训练 loss。需要续训：
 
 ```bash
 python scripts/train.py ... --resume checkpoints/receipt_lrcnn_v1/last.pt
 ```
 
-最终只对 `test.json` 做一次独立评估/推理，并人工抽查金额、收款人和付款方式的 OCR 完全匹配率。
+最终只对 `test.json` 做一次独立评估/推理，并人工抽查时间、金额、转账状态、收款人和付款方式的 OCR 完全匹配率。
 
 ## 推理与圈选结果
 
@@ -192,7 +195,7 @@ python scripts/infer.py \
 
 - `*_rectified_annotated.jpg`：纠正后图上的彩色圆圈；
 - `*_original_annotated.jpg`：原始照片上的透视回投圆圈；
-- `*.json`：金额（含分）、成功状态/勾、收款人、付款方式、置信度、坐标和变换矩阵；
+- `*.json`：时间、金额（含分）、转账状态、收款人、付款方式、置信度、坐标和变换矩阵；
 - `inference_manifest.json`：整批结果索引。
 
 低于 `--score-threshold` 的结果会被省略，字段 JSON 会明确标为 `absent` 或 `unreadable`，不会用空字符串伪装成已识别。

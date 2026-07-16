@@ -5,12 +5,13 @@ from __future__ import annotations
 from typing import Final
 
 # Keep this order fixed: model labels are one-based and background is zero.
+# Each class corresponds to one complete region marked by the user's red lines.
 DETECTION_CLASSES: Final[tuple[str, ...]] = (
+    "time",
     "amount",
-    "success_icon",
-    "success_text",
-    "recipient_value",
-    "payment_method_value",
+    "transfer_status",
+    "recipient_field",
+    "payment_method_field",
 )
 
 BACKGROUND_LABEL: Final[int] = 0

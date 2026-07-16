@@ -3,6 +3,24 @@ import json
 from PIL import Image
 
 from transfer_receipt_ai.labelme_to_coco import convert_labelme_to_coco
+from transfer_receipt_ai.labels import DETECTION_CLASSES, LABEL_TO_ID
+
+
+def test_fixed_five_field_label_contract() -> None:
+    assert DETECTION_CLASSES == (
+        "time",
+        "amount",
+        "transfer_status",
+        "recipient_field",
+        "payment_method_field",
+    )
+    assert LABEL_TO_ID == {
+        "time": 1,
+        "amount": 2,
+        "transfer_status": 3,
+        "recipient_field": 4,
+        "payment_method_field": 5,
+    }
 
 
 def test_labelme_conversion_keeps_text_truth(tmp_path) -> None:

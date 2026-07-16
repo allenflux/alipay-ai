@@ -19,7 +19,15 @@ from .geometry import (
     rectify_receipt,
 )
 from .model import Detection, LRCNNPredictor
-from .ocr import OCRResult, TextRecognizer, clean_text, normalize_amount, normalize_payment_method, normalize_status
+from .ocr import (
+    OCRResult,
+    TextRecognizer,
+    extract_field_value,
+    normalize_amount,
+    normalize_payment_method,
+    normalize_status,
+    normalize_time,
+)
 from .render import RenderItem, draw_original_circles, draw_rectified_circles
 
 
@@ -91,32 +99,32 @@ def _field_from_ocr(detection: ExtractedDetection | None) -> dict[str, object]:
 
 def _build_fields(detections: list[ExtractedDetection]) -> dict[str, Any]:
     by_label = {item.detection.label: item for item in detections}
+    screen_time = _field_from_ocr(by_label.get("time"))
+    if isinstance(screen_time.get("raw"), str):
+        screen_time["value"] = normalize_time(screen_time["raw"])
+
     amount = _field_from_ocr(by_label.get("amount"))
     if isinstance(amount.get("raw"), str):
         normalized_amount = normalize_amount(amount["raw"])
         if normalized_amount:
             amount.update(normalized_amount)
 
-    recipient = _field_from_ocr(by_label.get("recipient_value"))
-    payment_method = _field_from_ocr(by_label.get("payment_method_value"))
+    recipient = _field_from_ocr(by_label.get("recipient_field"))
+    if isinstance(recipient.get("raw"), str):
+        recipient["value"] = extract_field_value(recipient["raw"], "recipient")
+    payment_method = _field_from_ocr(by_label.get("payment_method_field"))
     if isinstance(payment_method.get("raw"), str):
-        payment_method.update(normalize_payment_method(payment_method["raw"]))
+        payment_value = extract_field_value(payment_method["raw"], "payment_method")
+        payment_method["value"] = payment_value
+        payment_method["normalized"] = normalize_payment_method(payment_value)["normalized"]
 
-    success_text = _field_from_ocr(by_label.get("success_text"))
-    status = normalize_status(success_text["raw"]) if isinstance(success_text.get("raw"), str) else "unknown"
-    icon_detected = "success_icon" in by_label
-    text_detected = "success_text" in by_label
+    transfer_status = _field_from_ocr(by_label.get("transfer_status"))
+    if isinstance(transfer_status.get("raw"), str):
+        transfer_status["normalized"] = normalize_status(transfer_status["raw"])
     return {
+        "time": screen_time,
         "amount": amount,
-        "transfer_success": {
-            "state": status,
-            "success_icon_detected": icon_detected,
-            "success_text_detected": text_detected,
-            # The detector still supplies a useful confirmation if a blurred crop
-            # makes OCR unreadable; the raw OCR state remains in success_text.
-            "confirmed": bool(icon_detected and (status == "success" or text_detected)),
-            "text": success_text,
-        },
+        "transfer_status": transfer_status,
         "recipient": recipient,
         "payment_method": payment_method,
     }
@@ -142,7 +150,7 @@ class ReceiptPipeline:
         detections: list[ExtractedDetection] = []
         for detection in raw_detections:
             ocr_result: OCRResult | None = None
-            if self.ocr is not None and detection.label != "success_icon":
+            if self.ocr is not None:
                 crop = _crop_with_margin(rectification.rectified_rgb, detection.bbox_xyxy)
                 if crop.size:
                     ocr_result = self.ocr.recognize(crop)

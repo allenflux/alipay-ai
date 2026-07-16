@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from .labels import ID_TO_LABEL, NUM_MODEL_CLASSES
+from .labels import DETECTION_CLASSES, ID_TO_LABEL, NUM_MODEL_CLASSES
 
 
 @dataclass(frozen=True)
@@ -54,9 +54,9 @@ def build_lrcnn(config: LRCNNConfig | None = None):
     except ModuleNotFoundError as error:
         raise ImportError("PyTorch and TorchVision are required. Install `pip install -r requirements.txt`.") from error
 
-    # Small check icons and long text lines need smaller and wider anchors than
-    # generic COCO. MobileNetV3-FPN exposes three feature levels, each with five
-    # scales and five aspect ratios.
+    # The compact status region and long field rows need smaller and wider anchors
+    # than generic COCO. MobileNetV3-FPN exposes three feature levels, each with
+    # five scales and five aspect ratios.
     anchor_generator = AnchorGenerator(
         sizes=((8, 16, 32, 64, 128),) * 3,
         aspect_ratios=((0.25, 0.5, 1.0, 2.0, 4.0),) * 3,
@@ -111,6 +111,22 @@ def choose_device(requested: str = "auto") -> str:
     return "cpu"
 
 
+def validate_checkpoint_classes(payload: Any) -> None:
+    """Reject checkpoints trained with a different semantic class order.
+
+    This is stricter than tensor-shape validation: the old and new receipt
+    schemas both have five foreground classes, so PyTorch would otherwise load
+    old weights successfully while silently assigning each class a new meaning.
+    """
+    expected = list(DETECTION_CLASSES)
+    found = payload.get("classes") if isinstance(payload, dict) else None
+    if not isinstance(found, (list, tuple)) or list(found) != expected:
+        raise ValueError(
+            "Checkpoint labels do not match the current five-field schema. "
+            f"Expected {expected}; found {found!r}. Re-train from newly labelled data."
+        )
+
+
 class LRCNNPredictor:
     """Checkpoint-backed detector with one best detection per required field."""
 
@@ -126,6 +142,7 @@ class LRCNNPredictor:
 
         self.device = choose_device(device)
         payload = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        validate_checkpoint_classes(payload)
         checkpoint_config = payload.get("model_config") if isinstance(payload, dict) else None
         if model_config is not None:
             config = model_config

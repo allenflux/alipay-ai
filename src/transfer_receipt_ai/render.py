@@ -12,18 +12,18 @@ from PIL import Image, ImageDraw, ImageFont
 from .geometry import transform_points
 
 DISPLAY_NAMES = {
+    "time": "时间",
     "amount": "金额",
-    "success_icon": "成功勾",
-    "success_text": "转账成功",
-    "recipient_value": "收款人",
-    "payment_method_value": "付款方式",
+    "transfer_status": "转账状态",
+    "recipient_field": "收款方",
+    "payment_method_field": "付款方式",
 }
 COLORS = {
+    "time": (222, 82, 255),
     "amount": (255, 80, 80),
-    "success_icon": (255, 210, 0),
-    "success_text": (255, 155, 60),
-    "recipient_value": (72, 202, 128),
-    "payment_method_value": (80, 160, 255),
+    "transfer_status": (255, 210, 0),
+    "recipient_field": (72, 202, 128),
+    "payment_method_field": (80, 160, 255),
 }
 
 
