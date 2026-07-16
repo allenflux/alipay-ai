@@ -131,6 +131,14 @@ def _parse_orientation(value: str) -> int | None:
     return degrees
 
 
+def parse_max_side(value: str) -> int:
+    """Parse 0 as no resizing, otherwise require a usable pixel dimension."""
+    max_side = int(value)
+    if max_side < 0 or max_side == 1:
+        raise argparse.ArgumentTypeError("max-side must be 0 (keep original resolution) or at least 2")
+    return max_side
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="EXIF-correct, rotate and perspective-rectify receipt screenshots/photos."
@@ -142,15 +150,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--landscape-ok", action="store_true", help="Do not rotate wide images to portrait by geometry")
     parser.add_argument("--no-auto-screen", action="store_true", help="Do not attempt automatic screen quadrilateral detection")
     parser.add_argument("--ocr-orientation", action="store_true", help="Use PaddleOCR to score all four text orientations")
-    parser.add_argument("--max-side", type=int, default=1600, help="Maximum long edge after perspective correction")
+    parser.add_argument(
+        "--max-side",
+        type=parse_max_side,
+        default=1600,
+        help="Maximum long edge after correction; use 0 to keep original resolution",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Replace existing prepared images")
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    if args.max_side < 2:
-        raise SystemExit("--max-side must be at least 2")
     records = prepare_images(
         args.input,
         args.output,

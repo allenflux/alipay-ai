@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import pytest
 
 from transfer_receipt_ai.geometry import (
     RectificationOptions,
@@ -10,6 +11,7 @@ from transfer_receipt_ai.geometry import (
     rectify_receipt,
     rotation_homography,
     transform_points,
+    warp_quad,
 )
 
 
@@ -36,6 +38,15 @@ def test_manual_rectification_preserves_coordinate_mapping() -> None:
     original_point = np.array([[12, 34]], dtype=np.float32)
     rectified_point = transform_points(original_point, result.original_to_rectified)
     assert np.allclose(transform_points(rectified_point, result.rectified_to_original), original_point)
+
+
+def test_max_side_zero_preserves_resolution_and_one_is_invalid() -> None:
+    image = np.zeros((80, 40, 3), dtype=np.uint8)
+    quad = np.array([[0, 0], [39, 0], [39, 79], [0, 79]], dtype=np.float32)
+    rectified, _ = warp_quad(image, quad, max_side=0)
+    assert rectified.shape == image.shape
+    with pytest.raises(ValueError, match="keep original resolution"):
+        warp_quad(image, quad, max_side=1)
 
 
 def test_wide_recipient_card_is_not_considered_a_screen() -> None:

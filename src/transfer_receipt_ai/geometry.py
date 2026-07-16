@@ -259,6 +259,8 @@ def warp_quad(image_rgb: np.ndarray, quad: np.ndarray, max_side: int = 1600) -> 
 
     ``H`` maps the coordinate system of ``image_rgb`` to the returned image.
     """
+    if max_side < 0 or max_side == 1:
+        raise ValueError("max_side must be 0 (keep original resolution) or at least 2")
     quad = order_quad(quad)
     output_width, output_height = _quad_dimensions(quad)
     longest_side = max(output_width, output_height)

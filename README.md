@@ -105,6 +105,7 @@ python scripts/prepare_photos.py \
 - 默认会保守地找手机/屏幕四边形并进行 `warpPerspective`；横向广告卡、收款人卡等 UI 面板会被排除。直接截图会保留完整画面。
 - 反光、边缘缺失的照片可在 `data/corrections.json` 写人工四角或固定方向，示例见 [data/corrections.example.json](data/corrections.example.json)。人工修正优先于自动判断。
 - 如果这一批全是完整截图，第一次准备时可加 `--no-auto-screen`，确保绝不裁切页面；拍照图单独一批再使用默认自动矫正。
+- `--max-side 0` 表示保持原图分辨率，不进行长边缩放。
 
 ### 2. 标注（不在图片上画红框）
 

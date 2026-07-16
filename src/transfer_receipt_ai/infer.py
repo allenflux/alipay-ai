@@ -13,7 +13,7 @@ from .geometry import RectificationOptions
 from .model import LRCNNPredictor
 from .ocr import PaddleOCRReader
 from .pipeline import ReceiptPipeline, write_receipt_result
-from .prepare import iter_image_paths, load_corrections
+from .prepare import iter_image_paths, load_corrections, parse_max_side
 
 
 def _parse_orientation(value: str) -> int | None:
@@ -96,7 +96,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--landscape-ok", action="store_true")
     parser.add_argument("--no-auto-screen", action="store_true")
     parser.add_argument("--ocr-orientation", action="store_true", help="Use OCR to distinguish all four orientations")
-    parser.add_argument("--max-side", type=int, default=1600)
+    parser.add_argument(
+        "--max-side",
+        type=parse_max_side,
+        default=1600,
+        help="Maximum long edge after correction; use 0 to keep original resolution",
+    )
     return parser
 
 
@@ -104,8 +109,6 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     if not 0.0 <= args.score_threshold <= 1.0:
         raise SystemExit("--score-threshold must be between 0 and 1")
-    if args.max_side < 2:
-        raise SystemExit("--max-side must be at least 2")
     outputs = run_inference(
         checkpoint=args.checkpoint,
         input_path=args.input,
