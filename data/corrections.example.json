@@ -1,0 +1,11 @@
+{
+  "rotated_photo.jpg": {
+    "orientation_degrees": 90
+  },
+  "reflective_photo.jpg": {
+    "screen_quad": [[42, 66], [1010, 42], [1036, 1740], [19, 1774]]
+  },
+  "bad_photo.jpg": {
+    "skip": true
+  }
+}

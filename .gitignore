@@ -1,0 +1,17 @@
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Large/private transaction images and generated artefacts.
+data/raw/*
+data/rectified/*
+data/annotations/*.json
+checkpoints/
+runs/
+
+!data/raw/.gitkeep
+!data/rectified/.gitkeep
+!data/annotations/.gitkeep

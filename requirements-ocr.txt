@@ -1,0 +1,2 @@
+# Install the correct PaddlePaddle wheel for your OS first, then install this file.
+paddleocr>=2.8

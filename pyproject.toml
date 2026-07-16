@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transfer-receipt-ai"
+version = "0.1.0"
+description = "LRCNN-based localisation and OCR for transfer receipt screenshots and photos"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Proprietary"}
+authors = [{name = "Transfer Receipt AI"}]
+dependencies = [
+    "numpy>=1.26",
+    "opencv-python>=4.10",
+    "Pillow>=10.3",
+    "torch>=2.3",
+    "torchvision>=0.18",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+ocr = ["paddleocr>=2.8"]
+dev = ["pytest>=8.2"]
+
+[project.scripts]
+receipt-prepare = "transfer_receipt_ai.prepare:main"
+receipt-labelme-to-coco = "transfer_receipt_ai.labelme_to_coco:main"
+receipt-split = "transfer_receipt_ai.split_dataset:main"
+receipt-train = "transfer_receipt_ai.train:main"
+receipt-infer = "transfer_receipt_ai.infer:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

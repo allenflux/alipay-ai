@@ -1,0 +1,167 @@
+"""Lightweight region-CNN detector used for transfer receipt field localisation."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from .labels import ID_TO_LABEL, NUM_MODEL_CLASSES
+
+
+@dataclass(frozen=True)
+class LRCNNConfig:
+    """Configuration for the project's LRCNN (MobileNetV3-FPN Faster R-CNN)."""
+
+    min_size: int = 768
+    max_size: int = 1536
+    trainable_backbone_layers: int = 3
+    pretrained: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class Detection:
+    label: str
+    score: float
+    bbox_xyxy: tuple[float, float, float, float]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "label": self.label,
+            "score": round(self.score, 6),
+            "bbox_rectified": [round(value, 3) for value in self.bbox_xyxy],
+        }
+
+
+def build_lrcnn(config: LRCNNConfig | None = None):
+    """Build the requested lightweight R-CNN detector.
+
+    The architecture is MobileNetV3 + FPN + RPN + RoIAlign + Fast R-CNN heads.
+    It is deliberately called ``LRCNN`` in this project (lightweight region CNN),
+    while using TorchVision's tested Faster R-CNN implementation underneath.
+    """
+    config = config or LRCNNConfig()
+    try:
+        from torchvision.models.detection import FasterRCNN_MobileNet_V3_Large_FPN_Weights
+        from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_fpn
+        from torchvision.models.detection.rpn import AnchorGenerator
+        from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+    except ModuleNotFoundError as error:
+        raise ImportError("PyTorch and TorchVision are required. Install `pip install -r requirements.txt`.") from error
+
+    # Small check icons and long text lines need smaller and wider anchors than
+    # generic COCO. MobileNetV3-FPN exposes three feature levels, each with five
+    # scales and five aspect ratios.
+    anchor_generator = AnchorGenerator(
+        sizes=((8, 16, 32, 64, 128),) * 3,
+        aspect_ratios=((0.25, 0.5, 1.0, 2.0, 4.0),) * 3,
+    )
+    # Build with no factory weights first.  Our RPN has five scales × five ratios
+    # (rather than COCO's 5 × 3), so direct strict loading of TorchVision's model
+    # weights would fail on the RPN prediction layers.
+    model = fasterrcnn_mobilenet_v3_large_fpn(
+        weights=None,
+        weights_backbone=None,
+        trainable_backbone_layers=config.trainable_backbone_layers,
+        min_size=config.min_size,
+        max_size=config.max_size,
+        rpn_anchor_generator=anchor_generator,
+        box_detections_per_img=50,
+    )
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, NUM_MODEL_CLASSES)
+    if config.pretrained:
+        # Reuse every matching COCO tensor (backbone/FPN/RoI features), while the
+        # six-logit (background + five fields) final head and custom-anchor logits
+        # remain freshly initialised.
+        pretrained_state = FasterRCNN_MobileNet_V3_Large_FPN_Weights.DEFAULT.get_state_dict(
+            progress=True,
+            check_hash=True,
+        )
+        current_state = model.state_dict()
+        compatible_state = {
+            key: value
+            for key, value in pretrained_state.items()
+            if key in current_state and current_state[key].shape == value.shape
+        }
+        model.load_state_dict(compatible_state, strict=False)
+    return model
+
+
+def choose_device(requested: str = "auto") -> str:
+    """Prefer service CUDA, then Apple MPS, then CPU."""
+    import torch
+
+    requested = requested.lower()
+    if requested != "auto":
+        if requested.startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested but is unavailable")
+        if requested == "mps" and not torch.backends.mps.is_available():
+            raise RuntimeError("MPS was requested but is unavailable")
+        return requested
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+class LRCNNPredictor:
+    """Checkpoint-backed detector with one best detection per required field."""
+
+    def __init__(
+        self,
+        checkpoint_path: str | Path,
+        *,
+        device: str = "auto",
+        score_threshold: float = 0.50,
+        model_config: LRCNNConfig | None = None,
+    ) -> None:
+        import torch
+
+        self.device = choose_device(device)
+        payload = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        checkpoint_config = payload.get("model_config") if isinstance(payload, dict) else None
+        if model_config is not None:
+            config = model_config
+        elif isinstance(checkpoint_config, dict):
+            config = LRCNNConfig(**checkpoint_config)
+        else:
+            config = LRCNNConfig()
+        # Model weights are in the checkpoint, so never trigger a COCO download.
+        self.model = build_lrcnn(LRCNNConfig(**{**config.as_dict(), "pretrained": False}))
+        state_dict = payload.get("model_state") if isinstance(payload, dict) else payload
+        if not isinstance(state_dict, dict):
+            raise ValueError("Checkpoint does not contain a model_state dictionary")
+        self.model.load_state_dict(state_dict)
+        self.model.to(self.device).eval()
+        self.score_threshold = score_threshold
+
+    def predict(self, image_rgb: np.ndarray) -> list[Detection]:
+        import torch
+
+        if image_rgb.ndim != 3 or image_rgb.shape[2] != 3:
+            raise ValueError("predict expects an H×W×3 RGB image")
+        tensor = torch.from_numpy(np.ascontiguousarray(image_rgb)).permute(2, 0, 1).float().div(255.0).to(self.device)
+        with torch.inference_mode():
+            result = self.model([tensor])[0]
+        boxes = result["boxes"].detach().cpu().numpy()
+        labels = result["labels"].detach().cpu().numpy()
+        scores = result["scores"].detach().cpu().numpy()
+        best_by_label: dict[str, Detection] = {}
+        for bbox, class_id, score in zip(boxes, labels, scores):
+            score = float(score)
+            if score < self.score_threshold:
+                continue
+            label = ID_TO_LABEL.get(int(class_id))
+            if label is None:
+                continue
+            detection = Detection(label, score, tuple(float(value) for value in bbox))
+            if label not in best_by_label or score > best_by_label[label].score:
+                best_by_label[label] = detection
+        return sorted(best_by_label.values(), key=lambda item: item.label)
