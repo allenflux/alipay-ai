@@ -86,10 +86,20 @@ def test_complete_validation_requires_each_label_exactly_once(tmp_path) -> None:
         json.dumps({"imagePath": "sample.jpg", "imageWidth": 100, "imageHeight": 100, "shapes": shapes}),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="missing=payment_method_field"):
+    with pytest.raises(ValueError, match=r"(?s)failed for 1 file\(s\).*missing=payment_method_field"):
         convert_labelme_to_coco(
             labels,
             images,
             tmp_path / "incomplete.json",
             require_complete=True,
         )
+
+    filtered = convert_labelme_to_coco(
+        labels,
+        images,
+        tmp_path / "complete-only.json",
+        complete_only=True,
+    )
+    assert filtered["images"] == []
+    assert filtered["annotations"] == []
+    assert filtered["info"]["skipped_incomplete"] == ["sample.json: missing=payment_method_field"]
