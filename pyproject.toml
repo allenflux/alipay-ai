@@ -25,6 +25,7 @@ dev = ["pytest>=8.2"]
 [project.scripts]
 receipt-prepare = "transfer_receipt_ai.prepare:main"
 receipt-labelme-to-coco = "transfer_receipt_ai.labelme_to_coco:main"
+receipt-auto-label = "transfer_receipt_ai.auto_label:main"
 receipt-split = "transfer_receipt_ai.split_dataset:main"
 receipt-train = "transfer_receipt_ai.train:main"
 receipt-infer = "transfer_receipt_ai.infer:main"

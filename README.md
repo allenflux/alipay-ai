@@ -185,6 +185,39 @@ python scripts/train.py ... --resume checkpoints/receipt_lrcnn_v1/last.pt
 
 最终只对 `test.json` 做一次独立评估/推理，并人工抽查时间、金额、转账状态、收款人和付款方式的 OCR 完全匹配率。
 
+## 半自动标注：模型画框，人工只复核
+
+不需要把所有图片从零手工画框。先用当前约 150–200 张人工标注固定 `train/val/test` 并训练 `receipt_lrcnn_v1`；之后让 `best.pt` 给尚未标注的纠正图生成 LabelMe JSON。自动标注直接在 `data/rectified/images` 上预测，不会再次旋转或透视变换。
+
+先只预标 10 张验证效果：
+
+```powershell
+python scripts/auto_label.py `
+  --checkpoint checkpoints/receipt_lrcnn_v1/best.pt `
+  --images data/rectified/images `
+  --output data/labels/all `
+  --device cuda `
+  --score-threshold 0.50 `
+  --review-threshold 0.80 `
+  --limit 10 `
+  --manifest runs/auto_label_v1/pilot.jsonl
+```
+
+- 已存在的人工 JSON 默认跳过且绝不覆盖；不要添加 `--overwrite`。
+- 少于五个框的预测也会写入，LabelMe 中只需补缺失框。
+- `pilot.jsonl` 会记录每张图的框分数、缺失类别和是否需要重点复核；置信度不是人工真值，因此不会写入 LabelMe 的 `description`。
+- 确认首批效果后，可将 `--limit 10` 改成 `--limit 100` 分批处理，避免一次生成大量未经复核的伪标签。
+
+继续用原命令打开 LabelMe：
+
+```powershell
+labelme data\rectified\images --output data\labels\all --labels data\labelme_labels.txt --no-sort-labels
+```
+
+自动框只用于减少拖框工作，必须逐张查看后保存。尤其是出现优惠、立减、`-¥` 时，即使模型置信度很高，也要确认 `amount` 框的是减免前的小金额。全部复核完成后再运行 `labelme_to_coco.py --require-complete`。
+
+第一轮纯人工 `val.json` 和 `test.json` 必须永久保留，自动标注图片只能扩充训练集，不能进入验证集或测试集。每轮优先复核缺框、低置信、新模板、拍照模糊和减免金额页面；高置信结果也随机抽查 5%–10%。
+
 ## 推理与圈选结果
 
 ```bash
