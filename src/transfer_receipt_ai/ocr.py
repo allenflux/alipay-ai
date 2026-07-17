@@ -58,16 +58,32 @@ def extract_field_value(raw_text: str, field: str) -> str:
 
 
 def _extract_paddle_lines(payload: Any) -> list[tuple[str, float]]:
-    """Support the common PaddleOCR 2.x result shape and its dict variants."""
+    """Support PaddleOCR 2.x lists and PaddleOCR 3.x ``Result`` objects."""
     lines: list[tuple[str, float]] = []
 
     def visit(node: Any) -> None:
         if node is None:
             return
+        # PaddleOCR 3.x ``predict`` yields Result objects.  Their public
+        # ``json`` attribute is the stable, documented representation.
+        if not isinstance(node, (dict, list, tuple)) and hasattr(node, "json"):
+            json_payload = node.json
+            if callable(json_payload):
+                json_payload = json_payload()
+            visit(json_payload)
+            return
         if isinstance(node, dict):
-            texts = node.get("rec_texts") or node.get("texts")
-            scores = node.get("rec_scores") or node.get("scores")
+            texts = node.get("rec_texts")
+            if texts is None:
+                texts = node.get("texts")
+            scores = node.get("rec_scores")
+            if scores is None:
+                scores = node.get("scores")
+            if isinstance(texts, np.ndarray):
+                texts = texts.tolist()
             if isinstance(texts, (list, tuple)):
+                if isinstance(scores, np.ndarray):
+                    scores = scores.tolist()
                 scores = scores if isinstance(scores, (list, tuple)) else [None] * len(texts)
                 for text, score in zip(texts, scores):
                     if isinstance(text, str):
@@ -101,22 +117,56 @@ class PaddleOCRReader:
 
     def __init__(self, language: str = "ch", use_angle_cls: bool = True) -> None:
         try:
-            from paddleocr import PaddleOCR
+            import paddleocr
         except ModuleNotFoundError as error:
             raise ImportError(
                 "PaddleOCR is not installed. Install a PaddlePaddle wheel for this platform, "
                 "then run `pip install -r requirements-ocr.txt`."
             ) from error
+        PaddleOCR = paddleocr.PaddleOCR
         self._use_angle_cls = use_angle_cls
-        options = {"lang": language, "use_angle_cls": use_angle_cls, "show_log": False}
-        try:
-            self._engine = PaddleOCR(**options)
-        except TypeError:  # PaddleOCR versions that no longer expose show_log.
-            options.pop("show_log")
-            self._engine = PaddleOCR(**options)
+
+        # PaddleOCR 3.x replaced ``use_angle_cls``/``show_log`` and the
+        # ``ocr`` call with pipeline options plus ``predict``.  Prefer its
+        # documented API, then fall back to the 2.x constructor.
+        v3_options = {
+            "lang": language,
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": use_angle_cls,
+        }
+
+        def initialise_v2() -> Any:
+            v2_options = {"lang": language, "use_angle_cls": use_angle_cls, "show_log": False}
+            try:
+                return PaddleOCR(**v2_options)
+            except (TypeError, ValueError):  # Some late 2.x builds removed show_log.
+                v2_options.pop("show_log")
+                return PaddleOCR(**v2_options)
+
+        version_match = re.match(r"(\d+)", str(getattr(paddleocr, "__version__", "")))
+        major_version = int(version_match.group(1)) if version_match else None
+        if major_version is not None and major_version >= 3:
+            self._engine = PaddleOCR(**v3_options)
+            self._api_version = 3
+        elif major_version == 2:
+            self._engine = initialise_v2()
+            self._api_version = 2
+        else:
+            # Unknown/private builds do not always expose __version__. Probe
+            # the v3 constructor, then retain compatibility with v2.
+            try:
+                self._engine = PaddleOCR(**v3_options)
+                self._api_version = 3
+            except (TypeError, ValueError):
+                self._engine = initialise_v2()
+                self._api_version = 2
 
     def recognize(self, image_rgb: np.ndarray) -> OCRResult:
-        raw = self._engine.ocr(image_rgb, cls=self._use_angle_cls)
+        if self._api_version == 3:
+            raw = self._engine.predict(image_rgb)
+        else:
+            raw = self._engine.ocr(image_rgb, cls=self._use_angle_cls)
         lines = _extract_paddle_lines(raw)
         if not lines:
             return OCRResult(text="", confidence=None)
