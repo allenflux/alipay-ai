@@ -187,7 +187,7 @@ def normalize_status(raw_text: str) -> str:
         return "failed"
     if any(token in compact for token in ("处理中", "待处理", "进行中")):
         return "pending"
-    if any(token in compact for token in ("转账成功", "交易成功", "付款成功", "转帐成功")):
+    if any(token in compact for token in ("转账成功", "交易成功", "付款成功", "支付成功", "转帐成功")):
         return "success"
     return "unknown"
 

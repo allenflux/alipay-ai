@@ -13,6 +13,7 @@ def test_normalize_amount_prefers_currency_value() -> None:
 
 def test_status_and_payment_normalization() -> None:
     assert normalize_status("转 账 成 功") == "success"
+    assert normalize_status("支付成功") == "success"
     assert normalize_status("转账未成功") == "failed"
     assert normalize_payment_method("账户余额") == {"raw": "账户余额", "normalized": "balance"}
     assert normalize_payment_method("余额宝(转出资金付款)") == {
