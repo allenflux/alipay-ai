@@ -130,10 +130,10 @@ def train_detector(
         checkpoint_config = resume_payload.get("model_config", {})
         if isinstance(checkpoint_config, dict):
             model_config = LRCNNConfig(**checkpoint_config)
-        # A resumed model obtains all its weights from the checkpoint, not the web.
-        model_config = LRCNNConfig(**{**model_config.as_dict(), "pretrained": False})
 
-    model = build_lrcnn(model_config).to(selected_device)
+    # A resumed model obtains all its weights from the checkpoint, while keeping
+    # the original normalization architecture recorded in model_config.
+    model = build_lrcnn(model_config, load_pretrained_weights=resume_payload is None).to(selected_device)
     optimizer = torch.optim.SGD(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=training_config.learning_rate,

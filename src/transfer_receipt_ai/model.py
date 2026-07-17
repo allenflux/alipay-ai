@@ -38,7 +38,11 @@ class Detection:
         }
 
 
-def build_lrcnn(config: LRCNNConfig | None = None):
+def build_lrcnn(
+    config: LRCNNConfig | None = None,
+    *,
+    load_pretrained_weights: bool | None = None,
+):
     """Build the requested lightweight R-CNN detector.
 
     The architecture is MobileNetV3 + FPN + RPN + RoIAlign + Fast R-CNN heads.
@@ -46,13 +50,37 @@ def build_lrcnn(config: LRCNNConfig | None = None):
     while using TorchVision's tested Faster R-CNN implementation underneath.
     """
     config = config or LRCNNConfig()
+    if load_pretrained_weights is None:
+        load_pretrained_weights = config.pretrained
     try:
+        from torch import nn
+        from torchvision.models import mobilenet_v3_large
+        from torchvision.models.detection import FasterRCNN
         from torchvision.models.detection import FasterRCNN_MobileNet_V3_Large_FPN_Weights
-        from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_fpn
+        from torchvision.models.detection.backbone_utils import _mobilenet_extractor
         from torchvision.models.detection.rpn import AnchorGenerator
-        from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+        from torchvision.ops.misc import FrozenBatchNorm2d
     except ModuleNotFoundError as error:
         raise ImportError("PyTorch and TorchVision are required. Install `pip install -r requirements.txt`.") from error
+
+    # Build the backbone explicitly instead of forwarding a custom anchor
+    # generator through fasterrcnn_mobilenet_v3_large_fpn().  Recent TorchVision
+    # versions create their own generator inside that factory, which otherwise
+    # passes rpn_anchor_generator to FasterRCNN twice.
+    #
+    # Keep the normalization architecture tied to the checkpoint configuration,
+    # not to whether weights are downloaded during this particular call.  This
+    # lets resume and inference rebuild a pretrained checkpoint without changing
+    # FrozenBatchNorm2d into BatchNorm2d.
+    if config.pretrained:
+        norm_layer = FrozenBatchNorm2d
+        trainable_backbone_layers = config.trainable_backbone_layers
+    else:
+        norm_layer = nn.BatchNorm2d
+        # TorchVision trains every backbone layer when starting without weights.
+        trainable_backbone_layers = 6
+    mobilenet = mobilenet_v3_large(weights=None, norm_layer=norm_layer)
+    backbone = _mobilenet_extractor(mobilenet, True, trainable_backbone_layers)
 
     # The compact status region and long field rows need smaller and wider anchors
     # than generic COCO. MobileNetV3-FPN exposes three feature levels, each with
@@ -61,21 +89,16 @@ def build_lrcnn(config: LRCNNConfig | None = None):
         sizes=((8, 16, 32, 64, 128),) * 3,
         aspect_ratios=((0.25, 0.5, 1.0, 2.0, 4.0),) * 3,
     )
-    # Build with no factory weights first.  Our RPN has five scales × five ratios
-    # (rather than COCO's 5 × 3), so direct strict loading of TorchVision's model
-    # weights would fail on the RPN prediction layers.
-    model = fasterrcnn_mobilenet_v3_large_fpn(
-        weights=None,
-        weights_backbone=None,
-        trainable_backbone_layers=config.trainable_backbone_layers,
+    model = FasterRCNN(
+        backbone,
+        num_classes=NUM_MODEL_CLASSES,
         min_size=config.min_size,
         max_size=config.max_size,
         rpn_anchor_generator=anchor_generator,
+        rpn_score_thresh=0.05,
         box_detections_per_img=50,
     )
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, NUM_MODEL_CLASSES)
-    if config.pretrained:
+    if config.pretrained and load_pretrained_weights:
         # Reuse every matching COCO tensor (backbone/FPN/RoI features), while the
         # six-logit (background + five fields) final head and custom-anchor logits
         # remain freshly initialised.
@@ -150,8 +173,9 @@ class LRCNNPredictor:
             config = LRCNNConfig(**checkpoint_config)
         else:
             config = LRCNNConfig()
-        # Model weights are in the checkpoint, so never trigger a COCO download.
-        self.model = build_lrcnn(LRCNNConfig(**{**config.as_dict(), "pretrained": False}))
+        # Model weights are in the checkpoint, so rebuild the same architecture
+        # without triggering another COCO download.
+        self.model = build_lrcnn(config, load_pretrained_weights=False)
         state_dict = payload.get("model_state") if isinstance(payload, dict) else payload
         if not isinstance(state_dict, dict):
             raise ValueError("Checkpoint does not contain a model_state dictionary")
