@@ -187,6 +187,21 @@ python scripts/train.py ... --resume checkpoints/receipt_lrcnn_v1/last.pt
 
 最终只对 `test.json` 做一次独立评估/推理，并人工抽查时间、金额、转账状态、收款人和付款方式的 OCR 完全匹配率。
 
+训练结束后，用验证阶段选出的 `best.pt` 对从未参与训练/选模的 `test.json` 做一次最终检测评估：
+
+```powershell
+python scripts/evaluate.py `
+  --checkpoint checkpoints/receipt_lrcnn_v1/best.pt `
+  --images data/rectified/images `
+  --annotations data/annotations/splits_v1/test.json `
+  --output runs/evaluation_v1/test_metrics.json `
+  --device cuda `
+  --batch-size 2 `
+  --workers 0
+```
+
+控制台和 `test_metrics.json` 会同时记录总 `mAP@0.50`，以及五类各自的 `AP50` 和 `Recall50`。不要改用 `last.pt`，也不要根据这 21 张测试图反复调参；后续调参继续只看验证集。
+
 ## 半自动标注：模型画框，人工只复核
 
 不需要把所有图片从零手工画框。先用当前约 150–200 张人工标注固定 `train/val/test` 并训练 `receipt_lrcnn_v1`；之后让 `best.pt` 给尚未标注的纠正图生成 LabelMe JSON。自动标注直接在 `data/rectified/images` 上预测，不会再次旋转或透视变换。
