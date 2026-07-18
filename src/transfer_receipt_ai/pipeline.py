@@ -171,7 +171,19 @@ def write_receipt_result(result: ReceiptResult, output_stem: str | Path) -> dict
     """Write JSON, rectified image, and perspective-correct original annotation."""
     output_stem = Path(output_stem)
     output_stem.parent.mkdir(parents=True, exist_ok=True)
-    items = [item.render_item() for item in result.detections]
+    structured_text = {
+        "time": result.fields.get("time", {}).get("value"),
+        "amount": result.fields.get("amount", {}).get("normalized"),
+        "recipient_field": result.fields.get("recipient", {}).get("value"),
+        "payment_method_field": result.fields.get("payment_method", {}).get("value"),
+    }
+    items: list[RenderItem] = []
+    for extracted in result.detections:
+        item = extracted.render_item()
+        replacement = structured_text.get(item.label)
+        if isinstance(replacement, str) and replacement:
+            item = RenderItem(item.label, item.score, item.bbox_xyxy, replacement)
+        items.append(item)
     rectified_path = output_stem.with_name(output_stem.name + "_rectified_annotated.jpg")
     original_path = output_stem.with_name(output_stem.name + "_original_annotated.jpg")
     json_path = output_stem.with_suffix(".json")

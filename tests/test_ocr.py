@@ -116,3 +116,6 @@ def test_extract_value_from_complete_red_line_row() -> None:
 def test_normalize_visible_status_bar_time() -> None:
     assert normalize_time("00:01:09 5G 14%") == "00:01:09"
     assert normalize_time("时间00：02") == "00:02"
+    assert normalize_time("80:00") == "00:08"
+    assert normalize_time("90:10:00") == "00:01:09"
+    assert normalize_time("25:99") is None

@@ -195,8 +195,27 @@ def normalize_time(raw_text: str) -> str | None:
     """Extract the visible status-bar time without inventing a transaction time."""
     # OCR commonly returns a full-width Chinese colon. Do not use ``\b`` here:
     # Chinese characters next to the time count as Unicode word characters.
-    match = _TIME_PATTERN.search(clean_text(raw_text).replace("：", ":"))
-    return match.group(1) if match else None
+    candidates = _TIME_PATTERN.findall(clean_text(raw_text).replace("：", ":"))
+
+    def valid_status_time(candidate: str) -> bool:
+        values = [int(value) for value in candidate.split(":")]
+        if len(values) not in {2, 3}:
+            return False
+        hour, minute = values[:2]
+        second = values[2] if len(values) == 3 else 0
+        return 0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59
+
+    for candidate in candidates:
+        if valid_status_time(candidate):
+            return candidate
+    # PaddleOCR occasionally reads a short status-bar crop from right to left,
+    # e.g. visible 00:08 becomes 80:00. Only reverse when the OCR candidate is
+    # impossible as a clock time and the full reversed string is valid.
+    for candidate in candidates:
+        reversed_candidate = candidate[::-1]
+        if valid_status_time(reversed_candidate):
+            return reversed_candidate
+    return None
 
 
 def normalize_amount(raw_text: str) -> dict[str, object] | None:
