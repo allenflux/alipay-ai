@@ -235,6 +235,38 @@ labelme data\rectified\images --output data\labels\all --labels data\labelme_lab
 
 第一轮纯人工 `val.json` 和 `test.json` 必须永久保留，自动标注图片只能扩充训练集，不能进入验证集或测试集。每轮优先复核缺框、低置信、新模板、拍照模糊和减免金额页面；高置信结果也随机抽查 5%–10%。
 
+复核完成后只转换五框齐全的自动标注，并与原来的训练集合并。冻结的验证集和测试集只用于防止数据泄漏，不能合入 v2 训练：
+
+```powershell
+python scripts/labelme_to_coco.py `
+  --labels data/labels/auto_v1 `
+  --images data/rectified/images `
+  --output data/annotations/auto_reviewed_v1.json `
+  --complete-only
+
+python scripts/merge_coco.py `
+  --input data/annotations/splits_v1/train.json `
+  --input data/annotations/auto_reviewed_v1.json `
+  --holdout data/annotations/splits_v1/val.json `
+  --holdout data/annotations/splits_v1/test.json `
+  --output data/annotations/train_v2.json
+
+python scripts/train.py `
+  --train-images data/rectified/images `
+  --train-annotations data/annotations/train_v2.json `
+  --val-images data/rectified/images `
+  --val-annotations data/annotations/splits_v1/val.json `
+  --init-checkpoint checkpoints/receipt_lrcnn_v1/best.pt `
+  --output checkpoints/receipt_lrcnn_v2 `
+  --device cuda `
+  --epochs 20 `
+  --batch-size 2 `
+  --learning-rate 0.001 `
+  --workers 4
+```
+
+`--init-checkpoint` 只继承 v1 的模型权重，v2 的优化器、学习率和 epoch 从头开始；它不同于中断后继续同一次训练所用的 `--resume`。
+
 ## 推理与圈选结果
 
 ```bash
@@ -255,6 +287,39 @@ python scripts/infer.py \
 - `inference_manifest.json`：整批结果索引。
 
 低于 `--score-threshold` 的结果会被省略，字段 JSON 会明确标为 `absent` 或 `unreadable`，不会用空字符串伪装成已识别。
+
+大量图片应固定分片并启用断点续跑。`scripts/run_bulk_infer.ps1` 已为 `D:\download\TempFakeImages` 配置成 60 个稳定分片，每片约 1,000 张；单张图片缺少任一字段或损坏时会进入该分片的 `inference_errors*.jsonl`，不会中止其余图片。先只跑第 0 片作为约 1,000 张的随机试运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 0 -EndShard 0 -Limit 100
+```
+
+`-Limit 100` 会在选中分片内按稳定哈希顺序固定选取最多 100 张源图；完整结果可能少于 100，因为缺框和损坏图片仍属于这批样本。试跑期间不要向源目录增删文件。试跑通过后，正式运行第 0 分片时去掉 `-Limit`；已经成功的图片会被断点续跑逻辑跳过，失败图片会重试，其余图片继续处理。
+
+核对试运行的识别文字、五个圈、耗时和磁盘占用后，再分阶段放量。每个阶段完成后抽查正常结果并查看全部错误清单：
+
+```powershell
+# 累计约 5,000 张
+powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 1 -EndShard 4
+
+# 累计约 15,000 张
+powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 5 -EndShard 14
+
+# 最后三段，每段约 15,000 张
+powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 15 -EndShard 29
+powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 30 -EndShard 44
+powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 45 -EndShard 59
+```
+
+中断后直接重跑相同命令即可。脚本固定启用 `--skip-existing`；它只有在结果 JSON 可解析、两张圈选图都存在且不早于原图时才会跳过。不要为同一个输出目录更换 checkpoint、阈值或渲染代码；新模型或新规则必须使用新的版本化输出目录。
+
+直立截图首轮不启用 OCR 四向判断。全量首轮完成后，可用同一个输出目录仅重试此前没有正常结果的图片；已有完整结果会自动跳过：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 0 -EndShard 59 -OcrOrientation
+```
+
+`-OcrOrientation` 会额外进行四次整图 OCR，因此只在第二轮重试中使用。暂时一次只运行一个分片：当前 PaddleOCR 运行在 CPU，并发多个进程通常会争抢 CPU 和内存，未必更快。
 
 ## 隐私
 

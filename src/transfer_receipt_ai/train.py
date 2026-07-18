@@ -97,8 +97,11 @@ def train_detector(
     training_config: TrainingConfig | None = None,
     device: str = "auto",
     resume: Path | None = None,
+    init_checkpoint: Path | None = None,
 ) -> Path:
     """Train and return the path to the best checkpoint."""
+    if resume is not None and init_checkpoint is not None:
+        raise ValueError("resume and init_checkpoint are mutually exclusive")
     training_config = training_config or TrainingConfig()
     model_config = model_config or LRCNNConfig(pretrained=training_config.pretrained)
     seed_everything(training_config.seed)
@@ -124,16 +127,20 @@ def train_detector(
 
     start_epoch = 0
     resume_payload: dict[str, Any] | None = None
-    if resume is not None:
-        resume_payload = torch.load(resume, map_location="cpu", weights_only=False)
-        validate_checkpoint_classes(resume_payload)
-        checkpoint_config = resume_payload.get("model_config", {})
+    initial_payload: dict[str, Any] | None = None
+    checkpoint_to_load = resume if resume is not None else init_checkpoint
+    if checkpoint_to_load is not None:
+        initial_payload = torch.load(checkpoint_to_load, map_location="cpu", weights_only=False)
+        validate_checkpoint_classes(initial_payload)
+        checkpoint_config = initial_payload.get("model_config", {})
         if isinstance(checkpoint_config, dict):
             model_config = LRCNNConfig(**checkpoint_config)
+        if resume is not None:
+            resume_payload = initial_payload
 
     # A resumed model obtains all its weights from the checkpoint, while keeping
     # the original normalization architecture recorded in model_config.
-    model = build_lrcnn(model_config, load_pretrained_weights=resume_payload is None).to(selected_device)
+    model = build_lrcnn(model_config, load_pretrained_weights=initial_payload is None).to(selected_device)
     optimizer = torch.optim.SGD(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=training_config.learning_rate,
@@ -144,6 +151,12 @@ def train_detector(
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.1)
     amp_enabled = selected_device.startswith("cuda") and training_config.amp
     scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    if init_checkpoint is not None and initial_payload is not None:
+        state_dict = initial_payload.get("model_state")
+        if not isinstance(state_dict, dict):
+            raise ValueError("Initial checkpoint does not contain a model_state dictionary")
+        model.load_state_dict(state_dict)
+        print(f"Initialized model weights from {init_checkpoint}; optimizer and epoch start fresh")
     if resume_payload is not None:
         model.load_state_dict(resume_payload["model_state"])
         if "optimizer_state" in resume_payload:
@@ -233,6 +246,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save-every", type=int, default=5)
     parser.add_argument("--resume", type=Path, help="Resume from last.pt or another checkpoint")
+    parser.add_argument(
+        "--init-checkpoint",
+        type=Path,
+        help="Initialize model weights from a checkpoint but start a fresh optimizer and epoch count",
+    )
     return parser
 
 
@@ -242,6 +260,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--val-images and --val-annotations must be supplied together")
     if args.epochs <= 0 or args.batch_size <= 0 or args.workers < 0 or args.save_every <= 0:
         raise SystemExit("epochs, batch-size and save-every must be positive; workers cannot be negative")
+    if args.resume is not None and args.init_checkpoint is not None:
+        raise SystemExit("--resume and --init-checkpoint cannot be used together")
     best = train_detector(
         train_images=args.train_images,
         train_annotations=args.train_annotations,
@@ -262,6 +282,7 @@ def main(argv: list[str] | None = None) -> None:
         ),
         device=args.device,
         resume=args.resume,
+        init_checkpoint=args.init_checkpoint,
     )
     print(f"Training complete. Best checkpoint: {best}")
 

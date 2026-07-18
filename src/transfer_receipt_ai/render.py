@@ -46,6 +46,10 @@ def ellipse_polygon(bbox_xyxy: Sequence[float], samples: int = 40) -> np.ndarray
 
 def _find_font(size: int) -> ImageFont.ImageFont:
     candidates = [
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/msyhbd.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/simsun.ttc",
         "/System/Library/Fonts/PingFang.ttc",
         "/System/Library/Fonts/STHeiti Light.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -63,30 +67,72 @@ def _item_caption(item: RenderItem) -> str:
     return f"{name}{suffix} ({item.score:.0%})"
 
 
+def _wrap_caption(draw: ImageDraw.ImageDraw, caption: str, font: ImageFont.ImageFont, max_width: int) -> str:
+    """Wrap mixed Chinese/ASCII captions without relying on whitespace."""
+    lines: list[str] = []
+    current = ""
+    for character in caption:
+        candidate = current + character
+        if current and draw.textlength(candidate, font=font) > max_width:
+            lines.append(current)
+            current = character
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return "\n".join(lines)
+
+
 def _draw_items(image_rgb: np.ndarray, item_polygons: Iterable[tuple[RenderItem, np.ndarray]]) -> np.ndarray:
     image = Image.fromarray(image_rgb.copy())
     draw = ImageDraw.Draw(image)
-    font = _find_font(19)
+    height, width = image_rgb.shape[:2]
+    font_size = max(30, min(58, int(round(max(height, width) * 0.022))))
+    font = _find_font(font_size)
+    line_width = max(4, min(10, int(round(max(height, width) * 0.003))))
+    padding = max(4, font_size // 7)
     for item, polygon in item_polygons:
         color = COLORS.get(item.label, (255, 0, 255))
         points = [tuple(float(value) for value in point) for point in polygon]
-        draw.line(points, fill=color, width=4, joint="curve")
+        draw.line(points, fill=color, width=line_width, joint="curve")
         x_values = [point[0] for point in points]
         y_values = [point[1] for point in points]
         caption = _item_caption(item)
         text_left = max(0, min(x_values))
-        text_top = max(0, min(y_values) - 25)
         try:
-            text_box = draw.textbbox((text_left, text_top), caption, font=font)
-            draw.rounded_rectangle(text_box, radius=3, fill=(0, 0, 0))
-            draw.text((text_left, text_top), caption, fill=color, font=font)
+            caption = _wrap_caption(draw, caption, font, max(80, width - padding * 2))
+            provisional_box = draw.multiline_textbbox((0, 0), caption, font=font, spacing=2)
+        except UnicodeEncodeError:
+            # Minimal Linux containers may not contain a CJK font.
+            caption = f"{item.label} ({item.score:.0%})"
+            provisional_box = draw.multiline_textbbox((0, 0), caption, font=font, spacing=2)
+        text_width = provisional_box[2] - provisional_box[0]
+        text_height = provisional_box[3] - provisional_box[1]
+        text_left = min(text_left, max(0, width - text_width - padding * 2))
+        text_top = max(0, min(y_values) - text_height - padding * 2)
+        try:
+            text_box = draw.multiline_textbbox((text_left, text_top), caption, font=font, spacing=2)
+            background = (
+                text_box[0] - padding,
+                text_box[1] - padding,
+                text_box[2] + padding,
+                text_box[3] + padding,
+            )
+            draw.rounded_rectangle(background, radius=padding, fill=(0, 0, 0), outline=color, width=2)
+            draw.multiline_text((text_left, text_top), caption, fill=(255, 255, 255), font=font, spacing=2)
         except UnicodeEncodeError:
             # Minimal Linux containers may not contain a CJK font. Keep rendering
             # the circle and fall back to the stable machine-readable label.
             caption = f"{item.label} ({item.score:.0%})"
             text_box = draw.textbbox((text_left, text_top), caption, font=font)
-            draw.rounded_rectangle(text_box, radius=3, fill=(0, 0, 0))
-            draw.text((text_left, text_top), caption, fill=color, font=font)
+            background = (
+                text_box[0] - padding,
+                text_box[1] - padding,
+                text_box[2] + padding,
+                text_box[3] + padding,
+            )
+            draw.rounded_rectangle(background, radius=padding, fill=(0, 0, 0), outline=color, width=2)
+            draw.text((text_left, text_top), caption, fill=(255, 255, 255), font=font)
         except AttributeError:  # Older Pillow still supports the actual text draw.
             draw.text((text_left, text_top), caption, fill=color, font=font)
     return np.asarray(image)
