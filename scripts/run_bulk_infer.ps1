@@ -83,8 +83,18 @@ try {
         Write-Host ""
         Write-Host ("[{0}] Starting shard {1}/{2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $ShardDisplay, $ShardCount)
         $Timer = [System.Diagnostics.Stopwatch]::StartNew()
-        & $Python @Arguments 2>&1 | Tee-Object -FilePath $LogPath
-        $ExitCode = $LASTEXITCODE
+        # Windows PowerShell 5.1 wraps every native stderr line as an ErrorRecord.
+        # Paddle emits harmless environment notices on stderr, so temporarily
+        # allow those lines through and decide success from python.exe's exit code.
+        $PreviousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & $Python @Arguments 2>&1 | Tee-Object -FilePath $LogPath
+            $ExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $PreviousErrorActionPreference
+        }
         $Timer.Stop()
 
         if ($ExitCode -ne 0) {
