@@ -84,58 +84,80 @@ def _wrap_caption(draw: ImageDraw.ImageDraw, caption: str, font: ImageFont.Image
 
 
 def _draw_items(image_rgb: np.ndarray, item_polygons: Iterable[tuple[RenderItem, np.ndarray]]) -> np.ndarray:
+    pairs = sorted(
+        list(item_polygons),
+        key=lambda pair: tuple(DISPLAY_NAMES).index(pair[0].label) if pair[0].label in DISPLAY_NAMES else 999,
+    )
     image = Image.fromarray(image_rgb.copy())
-    draw = ImageDraw.Draw(image)
+    image_draw = ImageDraw.Draw(image)
     height, width = image_rgb.shape[:2]
-    font_size = max(30, min(58, int(round(max(height, width) * 0.022))))
-    font = _find_font(font_size)
-    line_width = max(4, min(10, int(round(max(height, width) * 0.003))))
-    padding = max(4, font_size // 7)
-    for item, polygon in item_polygons:
+    line_width = max(3, min(7, int(round(max(height, width) * 0.002))))
+    for item, polygon in pairs:
         color = COLORS.get(item.label, (255, 0, 255))
         points = [tuple(float(value) for value in point) for point in polygon]
-        draw.line(points, fill=color, width=line_width, joint="curve")
-        x_values = [point[0] for point in points]
-        y_values = [point[1] for point in points]
-        caption = _item_caption(item)
-        text_left = max(0, min(x_values))
+        image_draw.line(points, fill=color, width=line_width, joint="curve")
+
+    if not pairs:
+        return np.asarray(image)
+
+    # Keep OCR text entirely outside the source pixels. The annotated image is
+    # widened with a compact legend so circles remain visible without covering
+    # the receipt text that the user needs to inspect.
+    font_size = max(16, min(30, height // 40, int(round(max(height, width) * 0.012))))
+    font = _find_font(font_size)
+    title_font = _find_font(min(34, font_size + 3))
+    padding = max(10, font_size // 2)
+    panel_width = max(300, min(680, int(round(width * 0.52))))
+    canvas = Image.new("RGB", (width + panel_width, height), (247, 248, 250))
+    canvas.paste(image, (0, 0))
+    draw = ImageDraw.Draw(canvas)
+    draw.line([(width, 0), (width, height)], fill=(190, 195, 205), width=max(2, line_width // 2))
+
+    title = "识别结果"
+    try:
+        draw.text((width + padding, padding), title, fill=(25, 28, 35), font=title_font)
+    except UnicodeEncodeError:
+        draw.text((width + padding, padding), "Detection results", fill=(25, 28, 35), font=title_font)
+    cursor_y = padding + font_size + padding
+    text_width = panel_width - padding * 3
+    for index, (item, _) in enumerate(pairs, start=1):
+        color = COLORS.get(item.label, (255, 0, 255))
+        caption = f"{index}. {_item_caption(item)}"
         try:
-            caption = _wrap_caption(draw, caption, font, max(80, width - padding * 2))
-            provisional_box = draw.multiline_textbbox((0, 0), caption, font=font, spacing=2)
+            caption = _wrap_caption(draw, caption, font, max(100, text_width))
+            text_box = draw.multiline_textbbox((0, 0), caption, font=font, spacing=max(3, font_size // 5))
         except UnicodeEncodeError:
-            # Minimal Linux containers may not contain a CJK font.
-            caption = f"{item.label} ({item.score:.0%})"
-            provisional_box = draw.multiline_textbbox((0, 0), caption, font=font, spacing=2)
-        text_width = provisional_box[2] - provisional_box[0]
-        text_height = provisional_box[3] - provisional_box[1]
-        text_left = min(text_left, max(0, width - text_width - padding * 2))
-        text_top = max(0, min(y_values) - text_height - padding * 2)
-        try:
-            text_box = draw.multiline_textbbox((text_left, text_top), caption, font=font, spacing=2)
-            background = (
-                text_box[0] - padding,
-                text_box[1] - padding,
-                text_box[2] + padding,
-                text_box[3] + padding,
-            )
-            draw.rounded_rectangle(background, radius=padding, fill=(0, 0, 0), outline=color, width=2)
-            draw.multiline_text((text_left, text_top), caption, fill=(255, 255, 255), font=font, spacing=2)
-        except UnicodeEncodeError:
-            # Minimal Linux containers may not contain a CJK font. Keep rendering
-            # the circle and fall back to the stable machine-readable label.
-            caption = f"{item.label} ({item.score:.0%})"
-            text_box = draw.textbbox((text_left, text_top), caption, font=font)
-            background = (
-                text_box[0] - padding,
-                text_box[1] - padding,
-                text_box[2] + padding,
-                text_box[3] + padding,
-            )
-            draw.rounded_rectangle(background, radius=padding, fill=(0, 0, 0), outline=color, width=2)
-            draw.text((text_left, text_top), caption, fill=(255, 255, 255), font=font)
-        except AttributeError:  # Older Pillow still supports the actual text draw.
-            draw.text((text_left, text_top), caption, fill=color, font=font)
-    return np.asarray(image)
+            caption = f"{index}. {item.label} ({item.score:.0%})"
+            text_box = draw.multiline_textbbox((0, 0), caption, font=font, spacing=3)
+        entry_height = max(font_size + padding, text_box[3] - text_box[1] + padding * 2)
+        if cursor_y + entry_height > height - padding:
+            # A very short landscape image may not have room for all text. Keep
+            # the source unobstructed and stop the legend instead of overlaying it.
+            break
+        left = width + padding
+        right = width + panel_width - padding
+        draw.rounded_rectangle(
+            (left, cursor_y, right, cursor_y + entry_height),
+            radius=max(4, padding // 2),
+            fill=(255, 255, 255),
+            outline=color,
+            width=max(2, line_width // 2),
+        )
+        stripe_width = max(5, padding // 2)
+        draw.rounded_rectangle(
+            (left, cursor_y, left + stripe_width, cursor_y + entry_height),
+            radius=max(3, stripe_width // 2),
+            fill=color,
+        )
+        draw.multiline_text(
+            (left + stripe_width + padding, cursor_y + padding),
+            caption,
+            fill=(25, 28, 35),
+            font=font,
+            spacing=max(3, font_size // 5),
+        )
+        cursor_y += entry_height + max(7, padding // 2)
+    return np.asarray(canvas)
 
 
 def draw_rectified_circles(image_rgb: np.ndarray, items: Sequence[RenderItem]) -> np.ndarray:
