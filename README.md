@@ -288,7 +288,7 @@ python scripts/infer.py \
 
 低于 `--score-threshold` 的结果会被省略，字段 JSON 会明确标为 `absent` 或 `unreadable`，不会用空字符串伪装成已识别。
 
-大量图片应固定分片并启用断点续跑。`scripts/run_bulk_infer.ps1` 已为 `D:\download\TempFakeImages` 配置成 60 个稳定分片，每片约 1,000 张；单张图片缺少任一字段或损坏时会进入该分片的 `inference_errors*.jsonl`，不会中止其余图片。先只跑第 0 片作为约 1,000 张的随机试运行：
+大量图片应固定分片并启用断点续跑。`scripts/run_bulk_infer.ps1` 已为 `D:\download\TempFakeImages` 配置成 60 个稳定分片；分片大小约为输入总数除以 60。当前 124,323 张输入平均每片约 2,072 张。单张图片缺少任一字段或损坏时会进入该分片的 `inference_errors*.jsonl`，不会中止其余图片。先在第 0 片固定抽取 100 张试运行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 0 -EndShard 0 -Limit 100
@@ -299,19 +299,26 @@ powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 
 核对试运行的识别文字、五个圈、耗时和磁盘占用后，再分阶段放量。每个阶段完成后抽查正常结果并查看全部错误清单：
 
 ```powershell
-# 累计约 5,000 张
+# 完成后累计约 10,000 张
 powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 1 -EndShard 4
 
-# 累计约 15,000 张
-powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 5 -EndShard 14
-
-# 最后三段，每段约 15,000 张
-powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 15 -EndShard 29
-powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 30 -EndShard 44
-powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 45 -EndShard 59
+# 之后每批约 10,000 张；继续使用相同 checkpoint 和输出目录
+powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 5 -EndShard 9
+powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 10 -EndShard 14
+# 其余继续按 15-19、20-24……55-59 分批运行
 ```
 
 中断后直接重跑相同命令即可。脚本固定启用 `--skip-existing`；它只有在结果 JSON 可解析、两张圈选图都存在且不早于原图时才会跳过。不要为同一个输出目录更换 checkpoint、阈值或渲染代码；新模型或新规则必须使用新的版本化输出目录。
+
+每个分片完成后，脚本还会把缺框、损坏或处理失败的原图复制到输出目录下的
+`_active_learning_errors/shard-NNN-of-060/raw/`。这里只会复制原图，不会移动、删除或修改输入目录；
+脚本也会拒绝把结果目录或错误池设置在输入目录内部。重复运行时，内容相同的文件会安全跳过，
+`raw_cohort_manifest.jsonl` 会累计记录曾经失败过的困难样本；`current_inference_errors.jsonl` 表示
+本次重试后仍未解决的错误，`history/` 保留每次错误清单快照。若要把困难样本放到独立磁盘目录，
+可传入 `-ErrorCohortDir "D:\download\TempFakeActiveLearning_v1\first_pass"`。
+
+困难样本用于 v2 前先运行照片纠正，再在 LabelMe 中复核。有效回执应修正并补齐五个真实字段框；
+损坏图、非回执或本身不存在五个字段的图片必须隔离，不能为了满足数量而伪造五框。
 
 直立截图首轮不启用 OCR 四向判断。全量首轮完成后，可用同一个输出目录仅重试此前没有正常结果的图片；已有完整结果会自动跳过：
 
