@@ -31,6 +31,11 @@ receipt-merge-coco = "transfer_receipt_ai.merge_coco:main"
 receipt-train = "transfer_receipt_ai.train:main"
 receipt-evaluate = "transfer_receipt_ai.evaluate:main"
 receipt-infer = "transfer_receipt_ai.infer:main"
+receipt-export-status-crops = "transfer_receipt_ai.status_crops:export_main"
+receipt-review-status-crops = "transfer_receipt_ai.status_crops:review_main"
+receipt-train-status-style = "transfer_receipt_ai.train_status_style:main"
+receipt-enrich-status-tags = "transfer_receipt_ai.enrich_status_tags:main"
+receipt-render-status-tag-review = "transfer_receipt_ai.status_tag_review:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

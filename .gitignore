@@ -9,6 +9,7 @@ __pycache__/
 data/raw/*
 data/rectified/*
 data/annotations/*.json
+data/status_style/*
 checkpoints/
 runs/
 

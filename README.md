@@ -328,6 +328,110 @@ powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 -StartShard 
 
 `-OcrOrientation` 会额外进行四次整图 OCR，因此只在第二轮重试中使用。暂时一次只运行一个分片：当前 PaddleOCR 运行在 CPU，并发多个进程通常会争抢 CPU 和内存，未必更快。
 
+## 状态样式标签：Android、iOS、无勾疑似假图
+
+这个需求是现有 `transfer_status` 框内的图像分类，不是第六个检测框。主 LRCNN 仍保持五类，
+因此 v1 checkpoint、旧标注和正在运行的批处理都不需要重做。独立分类器只观察“勾 + 成功文字”的
+干净裁图，学习三个客观标签：
+
+- `check_offset`：勾与成功文字不在同一水平位置，业务标签为 `android`；
+- `check_aligned`：勾与成功文字基本同线，业务标签为 `ios`；
+- `check_absent`：未看见勾，输出复核标签 `suspected_fake`；
+- 置信度不足时输出 `unknown/review`。
+
+`suspected_fake` 只表示需要复核，不能单凭这一项作最终真假结论。模糊、遮挡或裁切不完整也可能导致
+看不见勾；“有勾”同样不能证明图片真实。因此 sidecar 中的 `authenticity` 始终为
+`not_assessed`，并用 `review_tag=suspected_fake` 与 `requires_manual_review=true` 表达这个信号。
+
+先从已经完成的 v1 结果确定性抽取 900 个状态区域。工具会用原图和结果 JSON 中保存的单应矩阵
+重新生成干净裁图，不会使用带圈的预览图，也不会修改原图或 v1 JSON：
+
+```powershell
+python scripts\export_status_crops.py `
+  --results "D:\download\TempFakeResults_v1_pilot100_timefix" `
+  --output "data\status_style\r001" `
+  --limit 900 `
+  --continue-on-error
+```
+
+用键盘快速复核；程序每标一张就原子保存，中断后会从第一张未标图片继续：
+
+```powershell
+python scripts\review_status_crops.py `
+  --manifest "data\status_style\r001\status_crops_manifest.jsonl" `
+  --labels "data\status_style\r001\reviewed.jsonl"
+```
+
+按键为：`1=check_offset/Android`、`2=check_aligned/iOS`、`3=check_absent`、
+`4=unclear/不参与训练`、`B=返回上一张`、`Q=保存退出`。第一轮建议三类各至少 200–300 张；
+如果某类不足，可以提高同一个 `r001` 的 `--limit` 后重跑导出。脚本会冻结已经复核的 cohort，
+保持原成员和顺序不变，只在末尾追加新样本，因此 v1 仍在新增结果时也不会让旧标签错位。
+
+训练独立的 PyTorch MobileNetV3-small 分类器：
+
+```powershell
+python scripts\train_status_style.py `
+  --records "data\status_style\r001\reviewed.jsonl" `
+  --output "checkpoints\status_style_v1" `
+  --device cuda `
+  --epochs 20 `
+  --batch-size 32 `
+  --workers 4
+```
+
+训练会按回执分组切分 train/val、使用类别权重，并以验证集 `macro_f1` 选择 `best.pt`。几何增强、
+拉伸和翻转均被禁用，因为它们会破坏需要学习的对齐关系。首次使用 ImageNet 预训练权重可能需要下载；
+完全离线时可加 `--no-pretrained`，但通常需要更多标注才能达到相同效果。
+
+先给固定 100 个历史结果生成 sidecar 标签验证效果，不重跑 LRCNN 或 PaddleOCR：
+
+```powershell
+python scripts\enrich_status_tags.py `
+  --checkpoint "checkpoints\status_style_v1\best.pt" `
+  --input "D:\download\TempFakeResults_v1_pilot100_timefix" `
+  --output "D:\download\TempFakeStatusTags_v1" `
+  --device cuda `
+  --confidence-threshold 0.80 `
+  --absent-confidence-threshold 0.95 `
+  --shard-count 1 `
+  --shard-index 0 `
+  --limit 100 `
+  --skip-existing `
+  --continue-on-error
+```
+
+每张结果会生成独立的 `*.status_style.json`，其中包含原始三分类概率、`platform`、
+`authenticity`、模型 SHA-256 和阈值配置。原 v1 JSON 保持不变。生成一个浏览器可直接查看的
+HTML 页面，不用逐个打开 JSON：
+
+```powershell
+python scripts\render_status_tag_review.py `
+  --tags "D:\download\TempFakeStatusTags_v1" `
+  --output "D:\download\TempFakeStatusReview_v1" `
+  --limit 100
+```
+
+打开 `D:\download\TempFakeStatusReview_v1\index.html`，会看到状态裁图、Android/iOS/复核标签、
+置信度和三类概率。确认这 100 张效果后再分批回填：
+
+全量回填必须等 v1 的 60 个分片全部完成；否则后来新增的结果可能落入已经处理过的标签分片。
+批处理脚本会核对“原图总数 = v1 成功数 + 当前错误数”，pilot 或未完成快照会被拒绝：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_bulk_status_tags.ps1 `
+  -SourceDir "D:\download\TempFakeImages" `
+  -InputDir "D:\download\TempFakeResults_v1_pilot100_timefix" `
+  -OutputDir "D:\download\TempFakeStatusTags_v1" `
+  -Checkpoint "checkpoints\status_style_v1\best.pt" `
+  -StartShard 0 `
+  -EndShard 4
+```
+
+之后按 `5-9、10-14……55-59` 分批运行。相同模型和配置会断点跳过；如果 checkpoint 或阈值变化，
+sidecar 签名不同，会自动重新分类而不会误用旧标签。若 v1 后续又重试并新增了成功结果，必须再跑一遍
+`0-59`；已有 sidecar 会快速跳过，只补新增项。导出裁图和回填脚本都会拒绝原图、v1 结果与输出目录
+相互嵌套，避免误写原始数据。
+
 ## 隐私
 
 回执中可能包含姓名、余额、交易金额。原图、标注、日志和 checkpoint 都应限制访问；用于共享或调试时应删除不必要的个人数据，并保留脱敏字符原样。
