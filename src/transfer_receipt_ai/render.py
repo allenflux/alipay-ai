@@ -26,6 +26,19 @@ COLORS = {
     "payment_method_field": (80, 160, 255),
 }
 
+STATUS_STYLE_DISPLAY_VALUES = {
+    "check_offset": "Android",
+    "check_aligned": "iOS",
+    "check_absent": "疑似假图",
+    "unknown": "待复核",
+}
+STATUS_STYLE_COLORS = {
+    "check_offset": (66, 153, 89),
+    "check_aligned": (70, 118, 210),
+    "check_absent": (224, 74, 74),
+    "unknown": (225, 145, 35),
+}
+
 
 @dataclass(frozen=True)
 class RenderItem:
@@ -33,6 +46,19 @@ class RenderItem:
     score: float
     bbox_xyxy: tuple[float, float, float, float]
     text: str | None = None
+
+
+@dataclass(frozen=True)
+class StatusStyleRenderItem:
+    """One coordinate-free classifier result appended to the side legend.
+
+    This deliberately is not a ``RenderItem``: status style is inferred from
+    the existing ``transfer_status`` crop and does not introduce a sixth
+    detector box on the receipt.
+    """
+
+    label: str
+    confidence: float
 
 
 def ellipse_polygon(bbox_xyxy: Sequence[float], samples: int = 40) -> np.ndarray:
@@ -67,6 +93,11 @@ def _item_caption(item: RenderItem) -> str:
     return f"{name}{suffix} ({item.score:.0%})"
 
 
+def _status_style_caption(item: StatusStyleRenderItem) -> str:
+    value = STATUS_STYLE_DISPLAY_VALUES.get(item.label, STATUS_STYLE_DISPLAY_VALUES["unknown"])
+    return f"设备/风险标签 {value} ({item.confidence:.0%})"
+
+
 def _wrap_caption(draw: ImageDraw.ImageDraw, caption: str, font: ImageFont.ImageFont, max_width: int) -> str:
     """Wrap mixed Chinese/ASCII captions without relying on whitespace."""
     lines: list[str] = []
@@ -83,7 +114,12 @@ def _wrap_caption(draw: ImageDraw.ImageDraw, caption: str, font: ImageFont.Image
     return "\n".join(lines)
 
 
-def _draw_items(image_rgb: np.ndarray, item_polygons: Iterable[tuple[RenderItem, np.ndarray]]) -> np.ndarray:
+def _draw_items(
+    image_rgb: np.ndarray,
+    item_polygons: Iterable[tuple[RenderItem, np.ndarray]],
+    *,
+    status_style: StatusStyleRenderItem | None = None,
+) -> np.ndarray:
     pairs = sorted(
         list(item_polygons),
         key=lambda pair: tuple(DISPLAY_NAMES).index(pair[0].label) if pair[0].label in DISPLAY_NAMES else 999,
@@ -97,7 +133,7 @@ def _draw_items(image_rgb: np.ndarray, item_polygons: Iterable[tuple[RenderItem,
         points = [tuple(float(value) for value in point) for point in polygon]
         image_draw.line(points, fill=color, width=line_width, joint="curve")
 
-    if not pairs:
+    if not pairs and status_style is None:
         return np.asarray(image)
 
     # Keep OCR text entirely outside the source pixels. The annotated image is
@@ -157,18 +193,67 @@ def _draw_items(image_rgb: np.ndarray, item_polygons: Iterable[tuple[RenderItem,
             spacing=max(3, font_size // 5),
         )
         cursor_y += entry_height + max(7, padding // 2)
+
+    if status_style is not None:
+        color = STATUS_STYLE_COLORS.get(status_style.label, STATUS_STYLE_COLORS["unknown"])
+        caption = f"{len(pairs) + 1}. {_status_style_caption(status_style)}"
+        try:
+            caption = _wrap_caption(draw, caption, font, max(100, text_width))
+            text_box = draw.multiline_textbbox((0, 0), caption, font=font, spacing=max(3, font_size // 5))
+        except UnicodeEncodeError:
+            display_value = STATUS_STYLE_DISPLAY_VALUES.get(
+                status_style.label,
+                STATUS_STYLE_DISPLAY_VALUES["unknown"],
+            )
+            caption = f"{len(pairs) + 1}. Device/risk {display_value} ({status_style.confidence:.0%})"
+            text_box = draw.multiline_textbbox((0, 0), caption, font=font, spacing=3)
+        entry_height = max(font_size + padding, text_box[3] - text_box[1] + padding * 2)
+        if cursor_y + entry_height <= height - padding:
+            left = width + padding
+            right = width + panel_width - padding
+            draw.rounded_rectangle(
+                (left, cursor_y, right, cursor_y + entry_height),
+                radius=max(4, padding // 2),
+                fill=(255, 255, 255),
+                outline=color,
+                width=max(2, line_width // 2),
+            )
+            stripe_width = max(5, padding // 2)
+            draw.rounded_rectangle(
+                (left, cursor_y, left + stripe_width, cursor_y + entry_height),
+                radius=max(3, stripe_width // 2),
+                fill=color,
+            )
+            draw.multiline_text(
+                (left + stripe_width + padding, cursor_y + padding),
+                caption,
+                fill=(25, 28, 35),
+                font=font,
+                spacing=max(3, font_size // 5),
+            )
     return np.asarray(canvas)
 
 
-def draw_rectified_circles(image_rgb: np.ndarray, items: Sequence[RenderItem]) -> np.ndarray:
+def draw_rectified_circles(
+    image_rgb: np.ndarray,
+    items: Sequence[RenderItem],
+    *,
+    status_style: StatusStyleRenderItem | None = None,
+) -> np.ndarray:
     """Draw ellipse outlines in the detector's rectified coordinate system."""
-    return _draw_items(image_rgb, ((item, ellipse_polygon(item.bbox_xyxy)) for item in items))
+    return _draw_items(
+        image_rgb,
+        ((item, ellipse_polygon(item.bbox_xyxy)) for item in items),
+        status_style=status_style,
+    )
 
 
 def draw_original_circles(
     image_rgb: np.ndarray,
     items: Sequence[RenderItem],
     rectified_to_original: np.ndarray,
+    *,
+    status_style: StatusStyleRenderItem | None = None,
 ) -> np.ndarray:
     """Project rectified ellipses back into the photo before drawing them.
 
@@ -181,4 +266,5 @@ def draw_original_circles(
             (item, transform_points(ellipse_polygon(item.bbox_xyxy), rectified_to_original))
             for item in items
         ),
+        status_style=status_style,
     )

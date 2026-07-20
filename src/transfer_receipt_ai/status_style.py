@@ -12,6 +12,7 @@ independent evidence as well.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Final, Mapping, Sequence
@@ -26,6 +27,8 @@ STATUS_STYLE_CLASSES: Final[tuple[str, ...]] = (
 )
 
 UNKNOWN_STATUS_STYLE: Final[str] = "unknown"
+STATUS_STYLE_SCHEMA_VERSION: Final[int] = 2
+STATUS_STYLE_RULE_VERSION: Final[str] = "status-style-v2"
 
 STATUS_STYLE_BUSINESS_TAGS: Final[dict[str, str]] = {
     "check_offset": "android",
@@ -89,6 +92,64 @@ def business_tag_for_status_style(label: str) -> str:
     """
 
     return STATUS_STYLE_BUSINESS_TAGS.get(label, "review")
+
+
+def status_style_tags(prediction: Mapping[str, object]) -> dict[str, object]:
+    """Build the auditable platform/risk tags shared by sidecar and inline inference."""
+
+    label = prediction.get("label")
+    if label == "check_offset":
+        return {
+            "platform": "android",
+            "authenticity": "not_assessed",
+            "review_tag": None,
+            "requires_manual_review": False,
+            "reason": "status_check_offset",
+            "rule_version": STATUS_STYLE_RULE_VERSION,
+        }
+    if label == "check_aligned":
+        return {
+            "platform": "ios",
+            "authenticity": "not_assessed",
+            "review_tag": None,
+            "requires_manual_review": False,
+            "reason": "status_check_aligned",
+            "rule_version": STATUS_STYLE_RULE_VERSION,
+        }
+    if label == "check_absent":
+        return {
+            "platform": None,
+            "authenticity": "not_assessed",
+            "review_tag": "suspected_fake",
+            "requires_manual_review": True,
+            "reason": "status_check_absent",
+            "rule_version": STATUS_STYLE_RULE_VERSION,
+        }
+    return {
+        "platform": None,
+        "authenticity": "not_assessed",
+        "review_tag": "review",
+        "requires_manual_review": True,
+        "reason": "status_style_low_confidence",
+        "rule_version": STATUS_STYLE_RULE_VERSION,
+    }
+
+
+def status_style_checkpoint_signature(checkpoint_path: str | Path) -> dict[str, object]:
+    """Return a stable identity for skip/resume and inline-result provenance."""
+
+    checkpoint = Path(checkpoint_path).resolve()
+    if not checkpoint.is_file():
+        raise FileNotFoundError(checkpoint)
+    digest = hashlib.sha256()
+    with checkpoint.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "path": checkpoint.as_posix(),
+        "sha256": digest.hexdigest(),
+        "size_bytes": checkpoint.stat().st_size,
+    }
 
 
 def validate_status_style_checkpoint(payload: Any) -> None:
@@ -300,4 +361,3 @@ class StatusStylePredictor:
             confidence_threshold=self.confidence_threshold,
             absent_confidence_threshold=self.absent_confidence_threshold,
         )
-

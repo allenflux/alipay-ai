@@ -383,6 +383,52 @@ python scripts\train_status_style.py `
 拉伸和翻转均被禁用，因为它们会破坏需要学习的对齐关系。首次使用 ImageNet 预训练权重可能需要下载；
 完全离线时可加 `--no-pretrained`，但通常需要更多标注才能达到相同效果。
 
+### 一体化推理：五字段 + 状态样式
+
+训练完成后，新图片可以在一次推理中同时使用主 LRCNN v1 和状态样式分类器。主模型仍只检测五个框，
+分类器复用 `transfer_status` 裁图；结果 JSON 会新增顶层 `status_style`，圈选图右侧“识别结果”会新增
+第 6 项状态样式，但图片上不会多画第六个检测框。不传 `--status-style-checkpoint` 时，旧 v1 命令和
+原来的五字段输出完全兼容。
+
+先用一张原图做 Windows pilot（把示例文件名替换为实际文件）：
+
+```powershell
+python scripts\infer.py `
+  --checkpoint "checkpoints\receipt_lrcnn_v1\best.pt" `
+  --status-style-checkpoint "checkpoints\status_style_v1\best.pt" `
+  --input "D:\download\TempFakeImages\example.jpg" `
+  --output "D:\download\TempFakeResults_v1_status_pilot" `
+  --device cuda `
+  --ocr paddle `
+  --require-complete
+```
+
+确认 JSON 第 6 项和右侧栏显示正确后，在第 0 分片固定试跑 100 张：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 `
+  -InputDir "D:\download\TempFakeImages" `
+  -OutputDir "D:\download\TempFakeResults_v1_status" `
+  -Checkpoint "checkpoints\receipt_lrcnn_v1\best.pt" `
+  -StatusStyleCheckpoint "checkpoints\status_style_v1\best.pt" `
+  -StartShard 0 -EndShard 0 -Limit 100
+```
+
+pilot 通过后去掉 `-Limit`，按相同模型、阈值和输出目录继续分片；例如先完成 0–4 片：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_bulk_infer.ps1 `
+  -InputDir "D:\download\TempFakeImages" `
+  -OutputDir "D:\download\TempFakeResults_v1_status" `
+  -Checkpoint "checkpoints\receipt_lrcnn_v1\best.pt" `
+  -StatusStyleCheckpoint "checkpoints\status_style_v1\best.pt" `
+  -StartShard 0 -EndShard 4
+```
+
+始终使用新的、位于原图目录之外的 `OutputDir`。脚本只读取并复制原图，不会修改、移动或删除
+`D:\download\TempFakeImages` 中的文件。下面的 sidecar 流程用于给已经生成的旧 v1 结果补标签；
+新图片可直接使用上述一体化推理。
+
 先给固定 100 个历史结果生成 sidecar 标签验证效果，不重跑 LRCNN 或 PaddleOCR：
 
 ```powershell

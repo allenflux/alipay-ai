@@ -3,6 +3,7 @@ param(
     [string]$InputDir = "D:\download\TempFakeImages",
     [string]$OutputDir = "D:\download\TempFakeResults_v1_5fields",
     [string]$Checkpoint = "checkpoints\receipt_lrcnn_v1\best.pt",
+    [string]$StatusStyleCheckpoint = "",
     [string]$Python = ".\.venv\Scripts\python.exe",
     [ValidateRange(1, 10000)]
     [int]$ShardCount = 60,
@@ -13,6 +14,10 @@ param(
     [int]$Limit = 0,
     [ValidateRange(0.0, 1.0)]
     [double]$ScoreThreshold = 0.50,
+    [ValidateRange(0.0, 1.0)]
+    [double]$StatusConfidenceThreshold = 0.80,
+    [ValidateRange(0.0, 1.0)]
+    [double]$StatusAbsentConfidenceThreshold = 0.95,
     [string]$ErrorCohortDir = "",
     [switch]$OcrOrientation
 )
@@ -61,6 +66,12 @@ try {
     if (-not (Test-Path -LiteralPath $Checkpoint -PathType Leaf)) {
         throw "Checkpoint not found: $Checkpoint"
     }
+    if (-not [string]::IsNullOrWhiteSpace($StatusStyleCheckpoint) -and -not (Test-Path -LiteralPath $StatusStyleCheckpoint -PathType Leaf)) {
+        throw "Status-style checkpoint not found: $StatusStyleCheckpoint"
+    }
+    if ($StatusAbsentConfidenceThreshold -lt $StatusConfidenceThreshold) {
+        throw "StatusAbsentConfidenceThreshold must be at least StatusConfidenceThreshold"
+    }
     if (-not (Test-Path -LiteralPath $InputDir -PathType Container)) {
         throw "Input directory not found: $InputDir"
     }
@@ -83,6 +94,12 @@ try {
     Write-Host "Input:      $InputDir"
     Write-Host "Output:     $OutputDir"
     Write-Host "Checkpoint: $Checkpoint"
+    if (-not [string]::IsNullOrWhiteSpace($StatusStyleCheckpoint)) {
+        Write-Host "Status tag: $StatusStyleCheckpoint"
+        Write-Host ("Status confidence: normal={0}, no-check={1}" -f `
+            $StatusConfidenceThreshold.ToString([System.Globalization.CultureInfo]::InvariantCulture), `
+            $StatusAbsentConfidenceThreshold.ToString([System.Globalization.CultureInfo]::InvariantCulture))
+    }
     Write-Host "Error raw:  $ErrorCohortDir"
     Write-Host "Shards:     $StartShard through $EndShard of $ShardCount"
     if ($Limit -gt 0) {
@@ -110,6 +127,13 @@ try {
         )
         if ($OcrOrientation) {
             $Arguments += "--ocr-orientation"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($StatusStyleCheckpoint)) {
+            $Arguments += @(
+                "--status-style-checkpoint", $StatusStyleCheckpoint,
+                "--status-confidence-threshold", $StatusConfidenceThreshold.ToString([System.Globalization.CultureInfo]::InvariantCulture),
+                "--status-absent-confidence-threshold", $StatusAbsentConfidenceThreshold.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+            )
         }
         if ($Limit -gt 0) {
             $Arguments += @("--limit", $Limit)

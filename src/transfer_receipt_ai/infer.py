@@ -6,7 +6,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from tqdm import tqdm
 
@@ -16,6 +16,15 @@ from .model import LRCNNPredictor
 from .ocr import PaddleOCRReader
 from .pipeline import ReceiptPipeline, write_receipt_result
 from .prepare import iter_image_paths, load_corrections, parse_max_side
+from .status_style import (
+    STATUS_STYLE_SCHEMA_VERSION,
+    StatusStylePredictor,
+    status_style_checkpoint_signature,
+    status_style_tags,
+)
+
+
+STATUS_STYLE_MARGIN_RATIO = 0.30
 
 
 def _parse_orientation(value: str) -> int | None:
@@ -71,7 +80,13 @@ def _validate_output_names(image_paths: list[Path], root: Path) -> None:
         seen[key] = image_path
 
 
-def _committed_result_exists(source_path: Path, output_stem: Path) -> bool:
+def _committed_result_exists(
+    source_path: Path,
+    output_stem: Path,
+    *,
+    status_style_model: Mapping[str, object] | None = None,
+    status_style_inference_config: Mapping[str, object] | None = None,
+) -> bool:
     result_path = output_stem.with_suffix(".json")
     rectified_path = output_stem.with_name(output_stem.name + "_rectified_annotated.jpg")
     original_path = output_stem.with_name(output_stem.name + "_original_annotated.jpg")
@@ -83,7 +98,20 @@ def _committed_result_exists(source_path: Path, output_stem: Path) -> bool:
         payload = json.loads(result_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    return isinstance(payload, dict) and isinstance(payload.get("fields"), dict)
+    if not isinstance(payload, dict) or not isinstance(payload.get("fields"), dict):
+        return False
+    if status_style_model is None:
+        return True
+    status_style = payload.get("status_style")
+    tags = payload.get("tags")
+    return (
+        isinstance(status_style, dict)
+        and status_style.get("schema_version") == STATUS_STYLE_SCHEMA_VERSION
+        and status_style.get("model") == dict(status_style_model)
+        and status_style.get("inference_config") == dict(status_style_inference_config or {})
+        and isinstance(tags, dict)
+        and tags == status_style_tags(status_style)
+    )
 
 
 def _written_record(source_path: Path, output_stem: Path, *, status: str) -> dict[str, str]:
@@ -126,6 +154,9 @@ def run_inference(
     shard_count: int = 1,
     require_complete: bool = False,
     limit: int | None = None,
+    status_style_checkpoint: Path | None = None,
+    status_confidence_threshold: float = 0.80,
+    status_absent_confidence_threshold: float = 0.95,
 ) -> list[dict[str, str]]:
     """Process an image or image tree and write one result bundle per raw image."""
     all_image_paths = list(iter_image_paths(input_path))
@@ -135,6 +166,12 @@ def run_inference(
         raise ValueError("shard_count must be positive and shard_index must be in [0, shard_count)")
     if limit is not None and limit <= 0:
         raise ValueError("limit must be positive")
+    if not 0.0 <= status_confidence_threshold <= 1.0:
+        raise ValueError("status_confidence_threshold must be between 0 and 1")
+    if not 0.0 <= status_absent_confidence_threshold <= 1.0:
+        raise ValueError("status_absent_confidence_threshold must be between 0 and 1")
+    if status_absent_confidence_threshold < status_confidence_threshold:
+        raise ValueError("status_absent_confidence_threshold must be at least status_confidence_threshold")
     root = input_path.parent if input_path.is_file() else input_path
     _validate_output_names(all_image_paths, root)
     image_paths = sorted(
@@ -150,6 +187,24 @@ def run_inference(
     corrections = corrections or {}
     ocr = PaddleOCRReader() if use_ocr else None
     predictor = LRCNNPredictor(checkpoint, device=device, score_threshold=score_threshold)
+    status_style_predictor: StatusStylePredictor | None = None
+    status_style_model: dict[str, object] | None = None
+    status_style_inference_config: dict[str, object] | None = None
+    if status_style_checkpoint is not None:
+        # Hash and load exactly once per batch.  The signature makes resume
+        # safe when a checkpoint or one of its decision thresholds changes.
+        status_style_model = status_style_checkpoint_signature(status_style_checkpoint)
+        status_style_inference_config = {
+            "confidence_threshold": float(status_confidence_threshold),
+            "absent_confidence_threshold": float(status_absent_confidence_threshold),
+            "margin_ratio": STATUS_STYLE_MARGIN_RATIO,
+        }
+        status_style_predictor = StatusStylePredictor(
+            status_style_checkpoint,
+            device=device,
+            confidence_threshold=status_confidence_threshold,
+            absent_confidence_threshold=status_absent_confidence_threshold,
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path, manifest_jsonl_path, errors_jsonl_path = _manifest_paths(output_dir, shard_index, shard_count)
     manifest: list[dict[str, str]] = []
@@ -163,7 +218,12 @@ def run_inference(
             if override.get("skip") is True:
                 continue
             output_stem = (output_dir / relative_path).with_suffix("")
-            if skip_existing and _committed_result_exists(source_path, output_stem):
+            if skip_existing and _committed_result_exists(
+                source_path,
+                output_stem,
+                status_style_model=status_style_model,
+                status_style_inference_config=status_style_inference_config,
+            ):
                 record = _written_record(source_path, output_stem, status="skipped_existing")
                 manifest.append(record)
                 manifest_jsonl.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -178,7 +238,15 @@ def run_inference(
                     max_side=int(override.get("max_side", max_side)),
                     orientation_scorer=ocr.orientation_score if ocr and use_ocr_orientation else None,
                 )
-                pipeline = ReceiptPipeline(predictor, ocr=ocr, rectification_options=options)
+                pipeline = ReceiptPipeline(
+                    predictor,
+                    ocr=ocr,
+                    rectification_options=options,
+                    status_style_predictor=status_style_predictor,
+                    status_style_model=status_style_model,
+                    status_style_inference_config=status_style_inference_config,
+                    status_style_margin_ratio=STATUS_STYLE_MARGIN_RATIO,
+                )
                 result = pipeline.run(source_path)
                 if require_complete:
                     _require_five_fields(result)
@@ -207,10 +275,27 @@ def run_inference(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Detect, OCR and circle transfer receipt fields")
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--status-style-checkpoint",
+        type=Path,
+        help="Optional status-style classifier checkpoint; omit to keep the original five-field v1 output",
+    )
     parser.add_argument("--input", type=Path, required=True, help="Raw image or raw-image directory")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--score-threshold", type=float, default=0.50)
+    parser.add_argument(
+        "--status-confidence-threshold",
+        type=float,
+        default=0.80,
+        help="Minimum confidence for Android/iOS status-style tags",
+    )
+    parser.add_argument(
+        "--status-absent-confidence-threshold",
+        type=float,
+        default=0.95,
+        help="Stricter minimum confidence for the no-check suspected-fake tag",
+    )
     parser.add_argument("--ocr", choices=("paddle", "none"), default="paddle")
     parser.add_argument("--corrections", type=Path, help="Optional per-image manual correction JSON")
     parser.add_argument("--orientation", type=_parse_orientation, default=None)
@@ -240,6 +325,14 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     if not 0.0 <= args.score_threshold <= 1.0:
         raise SystemExit("--score-threshold must be between 0 and 1")
+    if not 0.0 <= args.status_confidence_threshold <= 1.0:
+        raise SystemExit("--status-confidence-threshold must be between 0 and 1")
+    if not 0.0 <= args.status_absent_confidence_threshold <= 1.0:
+        raise SystemExit("--status-absent-confidence-threshold must be between 0 and 1")
+    if args.status_absent_confidence_threshold < args.status_confidence_threshold:
+        raise SystemExit(
+            "--status-absent-confidence-threshold must be at least --status-confidence-threshold"
+        )
     if args.shard_count <= 0 or not 0 <= args.shard_index < args.shard_count:
         raise SystemExit("--shard-count must be positive and --shard-index must be in [0, shard-count)")
     if args.limit is not None and args.limit <= 0:
@@ -263,6 +356,9 @@ def main(argv: list[str] | None = None) -> None:
         shard_count=args.shard_count,
         require_complete=args.require_complete,
         limit=args.limit,
+        status_style_checkpoint=args.status_style_checkpoint,
+        status_confidence_threshold=args.status_confidence_threshold,
+        status_absent_confidence_threshold=args.status_absent_confidence_threshold,
     )
     print(f"Wrote {len(outputs)} inference result bundle(s) to {args.output}")
 

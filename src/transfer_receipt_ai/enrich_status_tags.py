@@ -17,11 +17,17 @@ from tqdm import tqdm
 
 from .geometry import load_upright_rgb
 from .status_crops import crop_status_region, reconstruct_rectified
-from .status_style import StatusStylePredictor
+from .status_style import (
+    STATUS_STYLE_RULE_VERSION,
+    STATUS_STYLE_SCHEMA_VERSION,
+    StatusStylePredictor,
+    status_style_checkpoint_signature,
+    status_style_tags,
+)
 
 
-SIDECAR_SCHEMA_VERSION = 2
-BUSINESS_RULE_VERSION = "status-style-v2"
+SIDECAR_SCHEMA_VERSION = STATUS_STYLE_SCHEMA_VERSION
+BUSINESS_RULE_VERSION = STATUS_STYLE_RULE_VERSION
 
 
 class UnsafeOutputPathError(ValueError):
@@ -128,57 +134,11 @@ def _sidecar_path(output_dir: Path, relative_result: Path) -> Path:
 
 
 def _checkpoint_signature(checkpoint: Path) -> dict[str, object]:
-    checkpoint = checkpoint.resolve()
-    if not checkpoint.is_file():
-        raise FileNotFoundError(checkpoint)
-    digest = hashlib.sha256()
-    with checkpoint.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return {
-        "path": checkpoint.as_posix(),
-        "sha256": digest.hexdigest(),
-        "size_bytes": checkpoint.stat().st_size,
-    }
+    return status_style_checkpoint_signature(checkpoint)
 
 
 def _business_tags(prediction: Mapping[str, object]) -> dict[str, object]:
-    label = prediction.get("label")
-    if label == "check_offset":
-        return {
-            "platform": "android",
-            "authenticity": "not_assessed",
-            "review_tag": None,
-            "requires_manual_review": False,
-            "reason": "status_check_offset",
-            "rule_version": BUSINESS_RULE_VERSION,
-        }
-    if label == "check_aligned":
-        return {
-            "platform": "ios",
-            "authenticity": "not_assessed",
-            "review_tag": None,
-            "requires_manual_review": False,
-            "reason": "status_check_aligned",
-            "rule_version": BUSINESS_RULE_VERSION,
-        }
-    if label == "check_absent":
-        return {
-            "platform": None,
-            "authenticity": "not_assessed",
-            "review_tag": "suspected_fake",
-            "requires_manual_review": True,
-            "reason": "status_check_absent",
-            "rule_version": BUSINESS_RULE_VERSION,
-        }
-    return {
-        "platform": None,
-        "authenticity": "not_assessed",
-        "review_tag": "review",
-        "requires_manual_review": True,
-        "reason": "status_style_low_confidence",
-        "rule_version": BUSINESS_RULE_VERSION,
-    }
+    return status_style_tags(prediction)
 
 
 def _committed_sidecar_exists(

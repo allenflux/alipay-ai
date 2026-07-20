@@ -28,7 +28,18 @@ from .ocr import (
     normalize_status,
     normalize_time,
 )
-from .render import RenderItem, draw_original_circles, draw_rectified_circles
+from .render import (
+    RenderItem,
+    StatusStyleRenderItem,
+    draw_original_circles,
+    draw_rectified_circles,
+)
+from .status_crops import crop_status_region
+from .status_style import (
+    STATUS_STYLE_SCHEMA_VERSION,
+    UNKNOWN_STATUS_STYLE,
+    status_style_tags,
+)
 
 
 @dataclass(frozen=True)
@@ -62,14 +73,23 @@ class ReceiptResult:
     rectification: RectificationResult
     detections: list[ExtractedDetection]
     fields: dict[str, Any]
+    status_style: dict[str, Any] | None = None
+    tags: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        output: dict[str, object] = {
             "source": self.source_path,
             "geometry": self.rectification.manifest(),
             "fields": self.fields,
             "detections": [detection.as_dict() for detection in self.detections],
         }
+        # Keep the original v1 JSON byte-for-byte compatible at the schema
+        # level when the optional status-style model is not enabled.
+        if self.status_style is not None:
+            output["status_style"] = self.status_style
+        if self.tags is not None:
+            output["tags"] = self.tags
+        return output
 
 
 def _crop_with_margin(image_rgb: np.ndarray, bbox_xyxy: tuple[float, float, float, float], margin_ratio: float = 0.08) -> np.ndarray:
@@ -137,16 +157,83 @@ class ReceiptPipeline:
         *,
         ocr: TextRecognizer | None = None,
         rectification_options: RectificationOptions | None = None,
+        status_style_predictor: Any | None = None,
+        status_style_model: dict[str, object] | None = None,
+        status_style_inference_config: dict[str, object] | None = None,
+        status_style_margin_ratio: float = 0.30,
     ) -> None:
+        if status_style_margin_ratio < 0:
+            raise ValueError("status_style_margin_ratio cannot be negative")
         self.predictor = predictor
         self.ocr = ocr
         self.rectification_options = rectification_options or RectificationOptions()
+        self.status_style_predictor = status_style_predictor
+        self.status_style_model = dict(status_style_model) if status_style_model is not None else None
+        self.status_style_inference_config = (
+            dict(status_style_inference_config)
+            if status_style_inference_config is not None
+            else {"margin_ratio": float(status_style_margin_ratio)}
+        )
+        self.status_style_margin_ratio = float(status_style_margin_ratio)
+
+    def _classify_status_style(
+        self,
+        rectified_rgb: np.ndarray,
+        raw_detections: list[Detection],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Classify the existing status box without creating a sixth detection."""
+        matches = [detection for detection in raw_detections if detection.label == "transfer_status"]
+        if not matches:
+            prediction_payload: dict[str, Any] = {
+                "schema_version": STATUS_STYLE_SCHEMA_VERSION,
+                "state": "unavailable",
+                "label": UNKNOWN_STATUS_STYLE,
+                "confidence": 0.0,
+                "business_tag": "review",
+                "candidate_label": UNKNOWN_STATUS_STYLE,
+                "probabilities": {},
+            }
+        else:
+            # The detector normally emits at most one item per class.  When a
+            # custom predictor emits duplicates, classify the strongest box;
+            # --require-complete still rejects the duplicate five-field result.
+            status_detection = max(matches, key=lambda detection: detection.score)
+            crop = crop_status_region(
+                rectified_rgb,
+                status_detection.bbox_xyxy,
+                margin_ratio=self.status_style_margin_ratio,
+            )
+            prediction = self.status_style_predictor.predict(crop)
+            if hasattr(prediction, "as_dict"):
+                values = prediction.as_dict()
+            elif isinstance(prediction, dict):
+                values = prediction
+            else:
+                raise TypeError("status-style predictor must return a mapping or an object with as_dict()")
+            if not isinstance(values, dict):
+                raise TypeError("status-style prediction as_dict() must return a dictionary")
+            prediction_payload = {
+                "schema_version": STATUS_STYLE_SCHEMA_VERSION,
+                "state": "classified" if values.get("label") != UNKNOWN_STATUS_STYLE else "review",
+                **values,
+                "transfer_status_bbox_rectified": [
+                    round(float(value), 3) for value in status_detection.bbox_xyxy
+                ],
+            }
+        if self.status_style_model is not None:
+            prediction_payload["model"] = self.status_style_model
+        prediction_payload["inference_config"] = self.status_style_inference_config
+        return prediction_payload, status_style_tags(prediction_payload)
 
     def run(self, source_path: str | Path) -> ReceiptResult:
         source_path = Path(source_path)
         source_rgb = load_upright_rgb(source_path)
         rectification = rectify_receipt(source_rgb, self.rectification_options)
         raw_detections = self.predictor.predict(rectification.rectified_rgb)
+        status_style: dict[str, Any] | None = None
+        tags: dict[str, Any] | None = None
+        if self.status_style_predictor is not None:
+            status_style, tags = self._classify_status_style(rectification.rectified_rgb, raw_detections)
         detections: list[ExtractedDetection] = []
         for detection in raw_detections:
             ocr_result: OCRResult | None = None
@@ -164,6 +251,8 @@ class ReceiptPipeline:
             rectification=rectification,
             detections=detections,
             fields=_build_fields(detections),
+            status_style=status_style,
+            tags=tags,
         )
 
 
@@ -184,13 +273,31 @@ def write_receipt_result(result: ReceiptResult, output_stem: str | Path) -> dict
         if isinstance(replacement, str) and replacement:
             item = RenderItem(item.label, item.score, item.bbox_xyxy, replacement)
         items.append(item)
+    status_style_item: StatusStyleRenderItem | None = None
+    if result.status_style is not None:
+        label = result.status_style.get("label")
+        confidence = result.status_style.get("confidence")
+        if isinstance(label, str) and isinstance(confidence, (int, float)):
+            status_style_item = StatusStyleRenderItem(label, float(confidence))
     rectified_path = output_stem.with_name(output_stem.name + "_rectified_annotated.jpg")
     original_path = output_stem.with_name(output_stem.name + "_original_annotated.jpg")
     json_path = output_stem.with_suffix(".json")
-    save_rgb(rectified_path, draw_rectified_circles(result.rectification.rectified_rgb, items))
+    save_rgb(
+        rectified_path,
+        draw_rectified_circles(
+            result.rectification.rectified_rgb,
+            items,
+            status_style=status_style_item,
+        ),
+    )
     save_rgb(
         original_path,
-        draw_original_circles(result.rectification.source_rgb, items, result.rectification.rectified_to_original),
+        draw_original_circles(
+            result.rectification.source_rgb,
+            items,
+            result.rectification.rectified_to_original,
+            status_style=status_style_item,
+        ),
     )
     json_path.write_text(json.dumps(result.as_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"json": json_path, "rectified_annotation": rectified_path, "original_annotation": original_path}
